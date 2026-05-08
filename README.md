@@ -21,13 +21,26 @@ Browser-resident WebAssembly microkernel for capability-scoped, multi-process AI
 ```
 browser-agent-os/
 ├── README.md
-├── mise.toml                     ← tool versions
+├── mise.toml                     ← tool versions + task chain
 ├── package.json                  ← Bun workspace root
 ├── tsconfig.json
+├── scripts/
+│   └── wasm-opt.ts               ← Binaryen wasm-opt -Oz pipeline
 ├── docs/
 │   └── ARCHITECTURE.md           ← layered architecture
 └── packages/
-    └── kernel/                   ← @browser-agent-os/kernel: browser-side WASI implementation (TS)
+    ├── kernel/                   ← @browser-agent-os/kernel: env-agnostic WASI core (TS)
+    ├── host-bun/                 ← @browser-agent-os/host-bun: Bun dev server + tests
+    └── coreutils/                ← Zig package, multiple wasm32-wasi binaries (echo, ...)
+```
+
+## Quick start
+
+```
+mise install              # bun + zig + node
+mise run build:bins       # zig build + wasm-opt
+mise run test             # end-to-end echo test in a real Worker
+mise run dev              # Bun dev server on :3000 serving /bin/<name>
 ```
 
 ## Architecture summary
@@ -36,7 +49,9 @@ The browser tab boots a TypeScript runtime (`@browser-agent-os/kernel`) that exp
 
 ## Status
 
-Greenfield. Skeleton only.
+MVP — `echo` runs end-to-end. Bun host serves wasm32-wasi binaries; kernel
+spawns guests in real Web Workers; stdout flows back through a worker-local
+buffer postMessage'd on `proc_exit`. No xterm, no OPFS, no pipes yet.
 
 ## Inspiration
 

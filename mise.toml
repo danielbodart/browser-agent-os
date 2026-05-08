@@ -1,3 +1,46 @@
 [tools]
 zig = "0.16.0"
 bun = "latest"
+node = "latest"
+
+[tasks."install"]
+description = "Install JS dependencies"
+run = "bun install --ignore-scripts"
+
+[tasks."build:coreutils"]
+description = "Compile @browser-agent-os/coreutils Zig binaries to wasm32-wasi"
+dir = "{{config_root}}/packages/coreutils"
+run = "zig build -Doptimize=ReleaseSmall"
+
+[tasks."optimize:coreutils"]
+description = "Run wasm-opt -Oz on coreutils binaries"
+depends = ["build:coreutils"]
+dir = "{{config_root}}"
+run = "bun run scripts/wasm-opt.ts packages/coreutils/zig-out/bin"
+
+[tasks."build:bins"]
+description = "Build + optimize all WASM binaries"
+depends = ["optimize:coreutils"]
+
+[tasks."check"]
+description = "TypeScript typecheck"
+run = "bun tsc --noEmit"
+
+[tasks."build"]
+description = "Full build: bins + typecheck + tests"
+depends = ["build:bins", "check"]
+run = "bun test"
+
+[tasks."test"]
+description = "Run tests"
+depends = ["build:bins"]
+run = "bun test"
+
+[tasks."dev"]
+description = "Bun dev server (serves coreutils + kernel)"
+depends = ["build:bins"]
+run = "bun --hot run packages/host-bun/src/app.ts"
+
+[tasks."clean"]
+description = "Remove all build artefacts"
+run = "rm -rf packages/coreutils/zig-out packages/coreutils/.zig-cache packages/*/dist"

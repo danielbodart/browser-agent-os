@@ -7,7 +7,12 @@
     "packages/*"
   ],
   "devDependencies": {
-    "typescript": "^5.7.0",
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "binaryen": "^129.0.0",
+    "fast-check": "^4.7.0",
+    "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "@bodar/yadic": "npm:@jsr/bodar__yadic"
   }
 }
