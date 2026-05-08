@@ -34,8 +34,10 @@ This is the stage that forces the JSPI question because `fd_write` and `fd_read`
 - `packages/kernel/src/transport/JSPITransport.ts` — kernel-resident `JsPipeBuffer`; worker RPCs back via `WebAssembly.Suspending` / `WebAssembly.promising`
 - `packages/kernel/src/transport/AtomicsTransport.ts` — `SharedArrayBuffer` ring buffer; workers operate on same SAB with `Atomics.wait` / `notify`; kernel main thread uses `Atomics.waitAsync`
 - `packages/kernel/src/pipe/PipeBuffer.ts` + `AtomicsPipeBuffer.ts` — 64 KiB capacity by default
-- `packages/kernel/src/worker/runner.atomics.ts` — Bun web-Worker runner with sync `Atomics.wait` syscalls
-- `packages/kernel/src/worker/jspi.ts` — env-agnostic JSPI runner (consumed by `host-bun/test/jspi/worker.mjs` for Node)
+- `packages/kernel/src/worker/wasiCommon.ts` — shared WASI preview-1 shim + `bootRunner` lifecycle
+- `packages/kernel/src/worker/atomics.ts` + `jspi.ts` — env-agnostic guest-runner factories layered on `wasiCommon`
+- `packages/kernel/src/worker/runner.atomics.web.ts` — web-Worker entry wiring `self` to `bootAtomicsRunner`
+- `packages/host-bun/test/jspi/worker.mjs` — Node `worker_threads` entry wiring `parentPort` to `bootJspiRunner`
 - `Kernel.pipe()` + `Kernel.spawn(binary, args, env, fds)` — lower-level substrate; no `spawnPipeline` invented (callers compose directly, matching what `browser_agent_os_ext::spawn` will expose to guests in Stage 4)
 - `packages/coreutils/src/cat/` — stdin → stdout
 - `packages/host-bun/test/pipe.contract.ts` — shared scenarios; consumed by `pipe.atomics.test.ts` (in-process Bun) and the Node subprocess `jspi/runner.mjs` (spawned via `Bun.spawn` with `--experimental-wasm-jspi --experimental-transform-types`)
