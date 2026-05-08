@@ -4,12 +4,21 @@ import type {Dependency} from "@bodar/yadic/types.ts";
 import type {Transport} from "./transport/Transport.ts";
 import type {Pipe, PipeEnd, FdMap} from "./pipe/Pipe.ts";
 import {DEFAULT_PIPE_CAPACITY} from "./pipe/Pipe.ts";
+import type {FileSystem} from "./fs/FileSystem.ts";
+import {FdTable} from "./fd/FdTable.ts";
+import type {FdEntry} from "./fd/FdEntry.ts";
+import {SyscallHandler} from "./syscall/SyscallHandler.ts";
+import type {PreopenDescriptor} from "./syscall/wire.ts";
 
 export type BinaryResolver = (name: string) => string | URL;
 
 export type LocalKernelDependencies =
     Dependency<'transport', Transport> &
-    Dependency<'binaryResolver', BinaryResolver>;
+    Dependency<'binaryResolver', BinaryResolver> &
+    Dependency<'fs', FileSystem>;
+
+const PREOPEN_FD = 3;
+const FIRST_ALLOC_FD = 16;
 
 export class LocalKernel implements Kernel {
     constructor(private readonly deps: LocalKernelDependencies) {}
@@ -50,12 +59,23 @@ export class LocalKernel implements Kernel {
             owned.push(p.readEnd, p.writeEnd);
         }
 
+        const initial: Array<[number, FdEntry]> = [];
+        for (const [fd, end] of merged) {
+            initial.push([fd, {kind: 'pipe', direction: end.kind, end}]);
+        }
+        const rootDir = await this.deps.fs.opendir('/');
+        initial.push([PREOPEN_FD, {kind: 'dir', handle: rootDir, path: '/', preopen: true}]);
+
+        const fdTable = new FdTable(initial, FIRST_ALLOC_FD);
+        const syscalls = new SyscallHandler(fdTable, this.deps.fs, end => tx.pipeBuffer(end));
+        const preopens: PreopenDescriptor[] = [{fd: PREOPEN_FD, path: '/'}];
+
         const url = this.deps.binaryResolver(binary).toString();
         const argv = [binary, ...args];
 
         let exitCode = 0;
         try {
-            const r = await tx.spawn({binaryUrl: url, args: argv, env, fds: merged});
+            const r = await tx.spawn({binaryUrl: url, args: argv, env, syscalls, preopens});
             exitCode = r.exitCode;
         } finally {
             for (const [, end] of merged) {

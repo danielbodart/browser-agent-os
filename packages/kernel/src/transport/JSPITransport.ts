@@ -1,71 +1,25 @@
 import type {Dependency} from "@bodar/yadic/types.ts";
-import type {Pipe, PipeEnd, FdMap} from "../pipe/Pipe.ts";
+import type {Pipe, PipeEnd} from "../pipe/Pipe.ts";
 import type {PipeBuffer} from "../pipe/PipeBuffer.ts";
 import {JsPipeBuffer, drainBuffer} from "../pipe/PipeBuffer.ts";
 import type {Transport, TransportSpawnOpts, TransportSpawnResult} from "./Transport.ts";
 import type {MessagingWorker, MessagingWorkerFactory} from "./MessagingWorker.ts";
+import {SyscallError} from "../syscall/SyscallHandler.ts";
+import {EIO} from "../wasi/Errno.ts";
+import {FsError} from "../fs/FileSystem.ts";
+import type {Syscalls} from "../syscall/Syscalls.ts";
+import type {ErrorMessage, ExitMessage, StartMessage, SyscallEnvelope, SyscallReply, SyscallRequest} from "../syscall/wire.ts";
 
 export type JSPITransportDependencies =
     Dependency<'workerFactory', MessagingWorkerFactory> &
     Dependency<'runnerUrl', string>;
 
-interface FdDescriptor {
-    readonly guestFd: number;
-    readonly kind: 'read' | 'write';
-    readonly endId: number;
-}
-
-interface StartMessage {
-    readonly type: 'start';
-    readonly binaryUrl: string;
-    readonly args: readonly string[];
-    readonly env: Readonly<Record<string, string>>;
-    readonly fds: readonly FdDescriptor[];
-}
-
-interface PipeWriteRequest {
-    readonly type: 'pipeWrite';
-    readonly reqId: number;
-    readonly endId: number;
-    readonly bytes: Uint8Array;
-}
-
-interface PipeReadRequest {
-    readonly type: 'pipeRead';
-    readonly reqId: number;
-    readonly endId: number;
-    readonly length: number;
-}
-
-interface PipeReply {
-    readonly type: 'pipeReply';
-    readonly reqId: number;
-    readonly n: number;
-    readonly bytes?: Uint8Array;
-}
-
-interface PipeReplyError {
-    readonly type: 'pipeError';
-    readonly reqId: number;
-    readonly message: string;
-}
-
-interface ExitMessage {
-    readonly type: 'exit';
-    readonly exitCode: number;
-}
-
-interface ErrorMessage {
-    readonly type: 'error';
-    readonly message: string;
-}
-
-type WorkerInbound = ExitMessage | ErrorMessage | PipeWriteRequest | PipeReadRequest;
-
 interface EndRecord {
     readonly buffer: PipeBuffer;
     readonly kind: 'read' | 'write';
 }
+
+type WorkerInbound = ExitMessage | ErrorMessage | SyscallEnvelope;
 
 export class JSPITransport implements Transport {
     private nextEndId = 1;
@@ -86,9 +40,9 @@ export class JSPITransport implements Transport {
     }
 
     drain(readEnd: PipeEnd): Promise<Uint8Array> {
-        const {buffer, kind} = this.endRecord(readEnd);
-        if (kind !== 'read') throw new Error(`drain requires a read end (got ${kind})`);
-        return drainBuffer(buffer);
+        const rec = this.endRecord(readEnd);
+        if (rec.kind !== 'read') throw new Error(`drain requires a read end (got ${rec.kind})`);
+        return drainBuffer(rec.buffer);
     }
 
     closeWriteEnd(end: PipeEnd): void {
@@ -106,12 +60,15 @@ export class JSPITransport implements Transport {
         return this.endRecord(end).buffer.buffered;
     }
 
+    pipeBuffer(end: PipeEnd): PipeBuffer {
+        return this.endRecord(end).buffer;
+    }
+
     spawn(opts: TransportSpawnOpts): Promise<TransportSpawnResult> {
-        const fds = this.descriptorsFor(opts.fds);
         const worker = this.deps.workerFactory(this.deps.runnerUrl);
         return new Promise<TransportSpawnResult>((resolve, reject) => {
             worker.addMessageListener((message: WorkerInbound) => {
-                this.handleMessage(worker, message, resolve, reject);
+                this.handleMessage(worker, opts.syscalls, message, resolve, reject);
             });
             worker.addErrorListener(err => {
                 worker.terminate();
@@ -122,7 +79,7 @@ export class JSPITransport implements Transport {
                 binaryUrl: opts.binaryUrl,
                 args: opts.args,
                 env: opts.env,
-                fds,
+                preopens: opts.preopens,
             };
             worker.postMessage(start);
         });
@@ -130,6 +87,7 @@ export class JSPITransport implements Transport {
 
     private handleMessage(
         worker: MessagingWorker,
+        syscalls: Syscalls,
         message: WorkerInbound,
         resolve: (r: TransportSpawnResult) => void,
         reject: (e: Error) => void,
@@ -143,43 +101,24 @@ export class JSPITransport implements Transport {
                 worker.terminate();
                 reject(new Error(message.message));
                 return;
-            case 'pipeWrite':
-                this.servicePipeWrite(worker, message);
-                return;
-            case 'pipeRead':
-                this.servicePipeRead(worker, message);
+            case 'syscall':
+                void this.serviceSyscall(worker, syscalls, message.request);
                 return;
         }
     }
 
-    private async servicePipeWrite(worker: MessagingWorker, req: PipeWriteRequest): Promise<void> {
-        const rec = this.ends.get(req.endId);
-        if (!rec || rec.kind !== 'write') {
-            const err: PipeReplyError = {type: 'pipeError', reqId: req.reqId, message: `bad write end ${req.endId}`};
-            worker.postMessage(err);
-            return;
-        }
+    private async serviceSyscall(worker: MessagingWorker, syscalls: Syscalls, request: SyscallRequest): Promise<void> {
         try {
-            const n = await rec.buffer.write(req.bytes);
-            const reply: PipeReply = {type: 'pipeReply', reqId: req.reqId, n};
+            const result = await dispatch(syscalls, request);
+            const reply: SyscallReply = {type: 'syscallReply', reqId: request.reqId, ok: true, result: result as any};
             worker.postMessage(reply);
         } catch (e) {
-            const err: PipeReplyError = {type: 'pipeError', reqId: req.reqId, message: (e as Error).message};
-            worker.postMessage(err);
+            let errno = EIO;
+            if (e instanceof SyscallError) errno = e.errno;
+            else if (e instanceof FsError) errno = e.errno;
+            const reply: SyscallReply = {type: 'syscallReply', reqId: request.reqId, ok: false, errno};
+            worker.postMessage(reply);
         }
-    }
-
-    private async servicePipeRead(worker: MessagingWorker, req: PipeReadRequest): Promise<void> {
-        const rec = this.ends.get(req.endId);
-        if (!rec || rec.kind !== 'read') {
-            const err: PipeReplyError = {type: 'pipeError', reqId: req.reqId, message: `bad read end ${req.endId}`};
-            worker.postMessage(err);
-            return;
-        }
-        const buf = new Uint8Array(req.length);
-        const n = await rec.buffer.read(buf);
-        const reply: PipeReply = {type: 'pipeReply', reqId: req.reqId, n, bytes: buf.subarray(0, n)};
-        worker.postMessage(reply);
     }
 
     private endRecord(end: PipeEnd): EndRecord {
@@ -187,13 +126,26 @@ export class JSPITransport implements Transport {
         if (!rec) throw new Error(`unknown pipe end id=${end.id}`);
         return rec;
     }
+}
 
-    private descriptorsFor(fds: FdMap): FdDescriptor[] {
-        const out: FdDescriptor[] = [];
-        for (const [guestFd, end] of fds) {
-            const rec = this.endRecord(end);
-            out.push({guestFd, kind: rec.kind, endId: end.id});
-        }
-        return out;
+async function dispatch(syscalls: Syscalls, req: SyscallRequest): Promise<unknown> {
+    switch (req.op) {
+        case 'fd_read': return syscalls.fdRead(req.fd, req.length);
+        case 'fd_write': return syscalls.fdWrite(req.fd, req.bytes);
+        case 'fd_pread': return syscalls.fdPread(req.fd, req.length, req.offset);
+        case 'fd_pwrite': return syscalls.fdPwrite(req.fd, req.bytes, req.offset);
+        case 'fd_close': await syscalls.fdClose(req.fd); return null;
+        case 'fd_seek': return {position: await syscalls.fdSeek(req.fd, req.offset, req.whence)};
+        case 'fd_tell': return {position: await syscalls.fdTell(req.fd)};
+        case 'fd_filestat_get': return syscalls.fdFilestatGet(req.fd);
+        case 'fd_filestat_set_size': await syscalls.fdFilestatSetSize(req.fd, req.size); return null;
+        case 'fd_sync': await syscalls.fdSync(req.fd); return null;
+        case 'fd_readdir': return {entries: await syscalls.fdReaddir(req.fd, req.cookie)};
+        case 'path_open': return {fd: await syscalls.pathOpen(req.dirfd, req.path, req.flags)};
+        case 'path_filestat_get': return syscalls.pathFilestatGet(req.dirfd, req.path);
+        case 'path_create_directory': await syscalls.pathCreateDirectory(req.dirfd, req.path); return null;
+        case 'path_remove_directory': await syscalls.pathRemoveDirectory(req.dirfd, req.path); return null;
+        case 'path_unlink_file': await syscalls.pathUnlinkFile(req.dirfd, req.path); return null;
+        case 'path_rename': await syscalls.pathRename(req.dirfd, req.from, req.toDirfd, req.to); return null;
     }
 }

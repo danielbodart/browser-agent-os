@@ -1,16 +1,13 @@
-import {ESUCCESS, EBADF, ESPIPE, ENOSYS} from "../wasi/Errno.ts";
-import {CHARACTER_DEVICE} from "../wasi/Filetype.ts";
+import {ESUCCESS, EBADF, EINVAL, ENOSYS} from "../wasi/Errno.ts";
+import {CHARACTER_DEVICE, DIRECTORY, REGULAR_FILE} from "../wasi/Filetype.ts";
+import type {FileStat, OpenFlags} from "../fs/FileSystem.ts";
+import type {DirReadEntry} from "../syscall/Syscalls.ts";
+import type {PreopenDescriptor, StartMessage, SyscallReply} from "../syscall/wire.ts";
+import {SyscallClient} from "./SyscallClient.ts";
 
 export interface RunnerIo {
     onMessage(handler: (msg: any) => void): void;
     postMessage(msg: unknown): void;
-}
-
-export interface StartMessageBase {
-    readonly type: 'start';
-    readonly binaryUrl: string;
-    readonly args: readonly string[];
-    readonly env: Readonly<Record<string, string>>;
 }
 
 export class ProcExit extends Error {
@@ -20,6 +17,9 @@ export class ProcExit extends Error {
 export interface MemoryAccessors {
     view(): DataView;
     u8(): Uint8Array;
+    readBytes(ptr: number, len: number): Uint8Array;
+    writeBytes(ptr: number, bytes: Uint8Array): void;
+    readString(ptr: number, len: number): string;
 }
 
 export function memoryAccessors(getMemory: () => WebAssembly.Memory | null): MemoryAccessors {
@@ -35,29 +35,63 @@ export function memoryAccessors(getMemory: () => WebAssembly.Memory | null): Mem
             cachedU8 = new Uint8Array(cachedBuffer);
         }
     };
+    const decoder = new TextDecoder();
     return {
         view: () => { refresh(); return cachedView; },
         u8: () => { refresh(); return cachedU8; },
+        readBytes(ptr, len) { refresh(); return cachedU8.slice(ptr, ptr + len); },
+        writeBytes(ptr, bytes) { refresh(); cachedU8.set(bytes, ptr); },
+        readString(ptr, len) { refresh(); return decoder.decode(cachedU8.subarray(ptr, ptr + len)); },
     };
 }
 
-export interface BasePreview1Ctx {
-    readonly args: readonly string[];
-    readonly env: Readonly<Record<string, string>>;
-    readonly mem: MemoryAccessors;
-    readonly fdHas: (fd: number) => boolean;
+function writeFilestat(view: DataView, ptr: number, stat: FileStat, inode: bigint): void {
+    view.setBigUint64(ptr, 0n, true);                     // dev
+    view.setBigUint64(ptr + 8, inode, true);              // ino
+    view.setUint8(ptr + 16, stat.type === 'directory' ? DIRECTORY : REGULAR_FILE);
+    view.setBigUint64(ptr + 24, 1n, true);                // nlink
+    view.setBigUint64(ptr + 32, stat.size, true);         // size
+    const t = BigInt(Math.round(stat.mtimeMs)) * 1_000_000n;
+    const c = BigInt(Math.round(stat.ctimeMs)) * 1_000_000n;
+    view.setBigUint64(ptr + 40, t, true);                 // atim
+    view.setBigUint64(ptr + 48, t, true);                 // mtim
+    view.setBigUint64(ptr + 56, c, true);                 // ctim
 }
 
-export function basePreview1(ctx: BasePreview1Ctx): Record<string, unknown> {
-    const {args, env, mem, fdHas} = ctx;
+const ALL_RIGHTS = 0xffffffff_ffffffffn;
+
+function decodeOpenFlags(oflags: number, fdflags: number, rights: bigint): OpenFlags {
+    const wantWrite = (rights & 64n) !== 0n;
+    const wantRead = (rights & 2n) !== 0n;
+    return {
+        create:    (oflags & 0x0001) !== 0,
+        directory: (oflags & 0x0002) !== 0,
+        exclusive: (oflags & 0x0004) !== 0,
+        truncate:  (oflags & 0x0008) !== 0,
+        // If guest passed no rights bits, default to read+write.
+        read:      wantRead || (rights === 0n),
+        write:     wantWrite || (rights === 0n),
+        append:    (fdflags & 0x0001) !== 0,
+    };
+}
+
+export function wasiPreview1<S extends StartMessage>(opts: {
+    readonly start: S;
+    readonly client: SyscallClient;
+    readonly mem: MemoryAccessors;
+}): Record<string, unknown> {
+    const {start, client, mem} = opts;
     const enc = new TextEncoder();
-    const argBytes = args.map(a => enc.encode(a + '\0'));
-    const envEntries = Object.entries(env).map(([k, v]) => `${k}=${v}`);
+
+    const argBytes = start.args.map(a => enc.encode(a + '\0'));
+    const envEntries = Object.entries(start.env).map(([k, v]) => `${k}=${v}`);
     const envBytes = envEntries.map(e => enc.encode(e + '\0'));
+
+    const preopens = new Map<number, PreopenDescriptor>(start.preopens.map(p => [p.fd, p]));
 
     return {
         args_sizes_get(argcPtr: number, bufSizePtr: number): number {
-            mem.view().setUint32(argcPtr, args.length, true);
+            mem.view().setUint32(argcPtr, start.args.length, true);
             mem.view().setUint32(bufSizePtr, argBytes.reduce((s, a) => s + a.length, 0), true);
             return ESUCCESS;
         },
@@ -84,48 +118,6 @@ export function basePreview1(ctx: BasePreview1Ctx): Record<string, unknown> {
             }
             return ESUCCESS;
         },
-        fd_close(_fd: number): number { return ESUCCESS; },
-        fd_seek(_fd: number, _offset: bigint, _whence: number, _newOffsetPtr: number): number { return ESPIPE; },
-        fd_tell(_fd: number, offsetPtr: number): number {
-            mem.view().setBigUint64(offsetPtr, 0n, true);
-            return ESUCCESS;
-        },
-        fd_renumber(_from: number, _to: number): number { return ESUCCESS; },
-        fd_advise(): number { return ESUCCESS; },
-        fd_allocate(): number { return ENOSYS; },
-        fd_datasync(): number { return ESUCCESS; },
-        fd_sync(): number { return ESUCCESS; },
-        fd_filestat_set_size(): number { return ENOSYS; },
-        fd_filestat_set_times(): number { return ENOSYS; },
-        fd_fdstat_get(fd: number, ptr: number): number {
-            if (!fdHas(fd)) return EBADF;
-            mem.view().setUint8(ptr, CHARACTER_DEVICE);
-            mem.view().setUint8(ptr + 1, 0);
-            mem.view().setUint16(ptr + 2, 0, true);
-            mem.view().setBigUint64(ptr + 8, 0n, true);
-            mem.view().setBigUint64(ptr + 16, 0n, true);
-            return ESUCCESS;
-        },
-        fd_fdstat_set_flags(_fd: number, _flags: number): number { return ESUCCESS; },
-        fd_prestat_get(_fd: number, _ptr: number): number { return EBADF; },
-        fd_prestat_dir_name(_fd: number, _pathPtr: number, _pathLen: number): number { return EBADF; },
-        fd_filestat_get(_fd: number, _ptr: number): number { return EBADF; },
-        fd_readdir(): number { return ENOSYS; },
-        path_link(): number { return ENOSYS; },
-        path_symlink(): number { return ENOSYS; },
-        path_filestat_set_times(): number { return ENOSYS; },
-        path_open(): number { return ENOSYS; },
-        path_filestat_get(): number { return ENOSYS; },
-        path_create_directory(): number { return ENOSYS; },
-        path_remove_directory(): number { return ENOSYS; },
-        path_unlink_file(): number { return ENOSYS; },
-        path_rename(): number { return ENOSYS; },
-        path_readlink(): number { return ENOSYS; },
-        proc_raise(): number { return ENOSYS; },
-        sock_accept(): number { return ENOSYS; },
-        sock_recv(): number { return ENOSYS; },
-        sock_send(): number { return ENOSYS; },
-        sock_shutdown(): number { return ENOSYS; },
         clock_time_get(_clockId: number, _precision: bigint, timePtr: number): number {
             mem.view().setBigUint64(timePtr, BigInt(Date.now()) * 1_000_000n, true);
             return ESUCCESS;
@@ -140,21 +132,254 @@ export function basePreview1(ctx: BasePreview1Ctx): Record<string, unknown> {
         },
         proc_exit(code: number): never { throw new ProcExit(code); },
         sched_yield(): number { return ESUCCESS; },
-        poll_oneoff(_in: number, _out: number, _nsubs: number, _neventsPtr: number): number { return ENOSYS; },
+        proc_raise(): number { return ENOSYS; },
+        sock_accept(): number { return ENOSYS; },
+        sock_recv(): number { return ENOSYS; },
+        sock_send(): number { return ENOSYS; },
+        sock_shutdown(): number { return ENOSYS; },
+        path_link(): number { return ENOSYS; },
+        path_symlink(): number { return ENOSYS; },
+        path_readlink(): number { return ENOSYS; },
+        path_filestat_set_times(): number { return ENOSYS; },
+        fd_advise(): number { return ESUCCESS; },
+        fd_allocate(): number { return ENOSYS; },
+        fd_datasync(): number { return ESUCCESS; },
+        fd_renumber(): number { return ESUCCESS; },
+        fd_filestat_set_times(): number { return ENOSYS; },
+        fd_fdstat_set_flags(): number { return ESUCCESS; },
+        fd_fdstat_set_rights(): number { return ESUCCESS; },
+        poll_oneoff(): number { return ENOSYS; },
+
+        fd_prestat_get(fd: number, ptr: number): number {
+            const p = preopens.get(fd);
+            if (!p) return EBADF;
+            const path = enc.encode(p.path);
+            mem.view().setUint8(ptr, 0);
+            mem.view().setUint32(ptr + 4, path.length, true);
+            return ESUCCESS;
+        },
+        fd_prestat_dir_name(fd: number, pathPtr: number, pathLen: number): number {
+            const p = preopens.get(fd);
+            if (!p) return EBADF;
+            const path = enc.encode(p.path);
+            if (path.length > pathLen) return EINVAL;
+            mem.u8().set(path, pathPtr);
+            return ESUCCESS;
+        },
+        fd_fdstat_get(fd: number, ptr: number): number {
+            const filetype = preopens.has(fd) ? DIRECTORY : CHARACTER_DEVICE;
+            mem.view().setUint8(ptr, filetype);
+            mem.view().setUint8(ptr + 1, 0);
+            mem.view().setUint16(ptr + 2, 0, true);
+            mem.view().setBigUint64(ptr + 8, ALL_RIGHTS, true);
+            mem.view().setBigUint64(ptr + 16, ALL_RIGHTS, true);
+            return ESUCCESS;
+        },
+
+        async fd_read(fd: number, iovsPtr: number, iovsLen: number, nReadPtr: number): Promise<number> {
+            const targets: Array<{ptr: number; len: number}> = [];
+            for (let i = 0; i < iovsLen; i++) {
+                const ptr = mem.view().getUint32(iovsPtr + i * 8, true);
+                const len = mem.view().getUint32(iovsPtr + i * 8 + 4, true);
+                if (len > 0) targets.push({ptr, len});
+            }
+            let total = 0;
+            for (const {ptr, len} of targets) {
+                const reply = await client.invoke({op: 'fd_read', fd, length: len});
+                if (!reply.ok) return reply.errno;
+                const r = reply.result as {n: number; bytes: Uint8Array};
+                if (r.n > 0) mem.writeBytes(ptr, r.bytes);
+                total += r.n;
+                if (r.n < len) break;
+            }
+            mem.view().setUint32(nReadPtr, total, true);
+            return ESUCCESS;
+        },
+        async fd_write(fd: number, iovsPtr: number, iovsLen: number, nWrittenPtr: number): Promise<number> {
+            const slices: Uint8Array[] = [];
+            for (let i = 0; i < iovsLen; i++) {
+                const ptr = mem.view().getUint32(iovsPtr + i * 8, true);
+                const len = mem.view().getUint32(iovsPtr + i * 8 + 4, true);
+                if (len > 0) slices.push(mem.readBytes(ptr, len));
+            }
+            let total = 0;
+            for (const s of slices) {
+                const reply = await client.invoke({op: 'fd_write', fd, bytes: s});
+                if (!reply.ok) return reply.errno;
+                const r = reply.result as {n: number};
+                total += r.n;
+                if (r.n < s.length) break;
+            }
+            mem.view().setUint32(nWrittenPtr, total, true);
+            return ESUCCESS;
+        },
+        async fd_pread(fd: number, iovsPtr: number, iovsLen: number, offset: bigint, nReadPtr: number): Promise<number> {
+            let total = 0;
+            let cur = offset;
+            for (let i = 0; i < iovsLen; i++) {
+                const ptr = mem.view().getUint32(iovsPtr + i * 8, true);
+                const len = mem.view().getUint32(iovsPtr + i * 8 + 4, true);
+                if (len === 0) continue;
+                const reply = await client.invoke({op: 'fd_pread', fd, length: len, offset: cur});
+                if (!reply.ok) return reply.errno;
+                const r = reply.result as {n: number; bytes: Uint8Array};
+                if (r.n > 0) mem.writeBytes(ptr, r.bytes);
+                total += r.n;
+                cur += BigInt(r.n);
+                if (r.n < len) break;
+            }
+            mem.view().setUint32(nReadPtr, total, true);
+            return ESUCCESS;
+        },
+        async fd_pwrite(fd: number, iovsPtr: number, iovsLen: number, offset: bigint, nWrittenPtr: number): Promise<number> {
+            let total = 0;
+            let cur = offset;
+            for (let i = 0; i < iovsLen; i++) {
+                const ptr = mem.view().getUint32(iovsPtr + i * 8, true);
+                const len = mem.view().getUint32(iovsPtr + i * 8 + 4, true);
+                if (len === 0) continue;
+                const slice = mem.readBytes(ptr, len);
+                const reply = await client.invoke({op: 'fd_pwrite', fd, bytes: slice, offset: cur});
+                if (!reply.ok) return reply.errno;
+                const r = reply.result as {n: number};
+                total += r.n;
+                cur += BigInt(r.n);
+                if (r.n < len) break;
+            }
+            mem.view().setUint32(nWrittenPtr, total, true);
+            return ESUCCESS;
+        },
+        async fd_close(fd: number): Promise<number> {
+            const reply = await client.invoke({op: 'fd_close', fd});
+            return reply.ok ? ESUCCESS : reply.errno;
+        },
+        async fd_seek(fd: number, offset: bigint, whence: number, newOffsetPtr: number): Promise<number> {
+            if (whence < 0 || whence > 2) return EINVAL;
+            const reply = await client.invoke({op: 'fd_seek', fd, offset, whence: whence as 0|1|2});
+            if (!reply.ok) return reply.errno;
+            const r = reply.result as {position: bigint};
+            mem.view().setBigUint64(newOffsetPtr, r.position, true);
+            return ESUCCESS;
+        },
+        async fd_tell(fd: number, offsetPtr: number): Promise<number> {
+            const reply = await client.invoke({op: 'fd_tell', fd});
+            if (!reply.ok) return reply.errno;
+            const r = reply.result as {position: bigint};
+            mem.view().setBigUint64(offsetPtr, r.position, true);
+            return ESUCCESS;
+        },
+        async fd_filestat_get(fd: number, ptr: number): Promise<number> {
+            const reply = await client.invoke({op: 'fd_filestat_get', fd});
+            if (!reply.ok) return reply.errno;
+            writeFilestat(mem.view(), ptr, reply.result as FileStat, BigInt(fd));
+            return ESUCCESS;
+        },
+        async fd_filestat_set_size(fd: number, size: bigint): Promise<number> {
+            const reply = await client.invoke({op: 'fd_filestat_set_size', fd, size});
+            return reply.ok ? ESUCCESS : reply.errno;
+        },
+        async fd_sync(fd: number): Promise<number> {
+            const reply = await client.invoke({op: 'fd_sync', fd});
+            return reply.ok ? ESUCCESS : reply.errno;
+        },
+        async fd_readdir(fd: number, bufPtr: number, bufLen: number, cookie: bigint, bufUsedPtr: number): Promise<number> {
+            const reply = await client.invoke({op: 'fd_readdir', fd, cookie});
+            if (!reply.ok) return reply.errno;
+            const {entries} = reply.result as {entries: readonly DirReadEntry[]};
+            let off = 0;
+            for (const e of entries) {
+                const nameBytes = enc.encode(e.name);
+                const headerLen = 24;
+                if (off + headerLen > bufLen) break;
+                mem.view().setBigUint64(bufPtr + off, e.cookie, true);
+                mem.view().setBigUint64(bufPtr + off + 8, e.inode, true);
+                mem.view().setUint32(bufPtr + off + 16, nameBytes.length, true);
+                mem.view().setUint8(bufPtr + off + 20, e.type === 'directory' ? DIRECTORY : REGULAR_FILE);
+                off += headerLen;
+                const nameRoom = Math.min(nameBytes.length, bufLen - off);
+                if (nameRoom > 0) mem.u8().set(nameBytes.subarray(0, nameRoom), bufPtr + off);
+                off += nameBytes.length;
+                if (off > bufLen) { off = bufLen; break; }
+            }
+            mem.view().setUint32(bufUsedPtr, Math.min(off, bufLen), true);
+            return ESUCCESS;
+        },
+        async path_open(
+            dirfd: number,
+            _dirflags: number,
+            pathPtr: number,
+            pathLen: number,
+            oflags: number,
+            fsRightsBase: bigint,
+            _fsRightsInheriting: bigint,
+            fdflags: number,
+            fdOutPtr: number,
+        ): Promise<number> {
+            const path = mem.readString(pathPtr, pathLen);
+            const flags = decodeOpenFlags(oflags, fdflags, fsRightsBase);
+            const reply = await client.invoke({op: 'path_open', dirfd, path, flags});
+            if (!reply.ok) return reply.errno;
+            const r = reply.result as {fd: number};
+            mem.view().setUint32(fdOutPtr, r.fd, true);
+            return ESUCCESS;
+        },
+        async path_filestat_get(dirfd: number, _flags: number, pathPtr: number, pathLen: number, ptr: number): Promise<number> {
+            const path = mem.readString(pathPtr, pathLen);
+            const reply = await client.invoke({op: 'path_filestat_get', dirfd, path});
+            if (!reply.ok) return reply.errno;
+            writeFilestat(mem.view(), ptr, reply.result as FileStat, 0n);
+            return ESUCCESS;
+        },
+        async path_create_directory(dirfd: number, pathPtr: number, pathLen: number): Promise<number> {
+            const path = mem.readString(pathPtr, pathLen);
+            const reply = await client.invoke({op: 'path_create_directory', dirfd, path});
+            return reply.ok ? ESUCCESS : reply.errno;
+        },
+        async path_remove_directory(dirfd: number, pathPtr: number, pathLen: number): Promise<number> {
+            const path = mem.readString(pathPtr, pathLen);
+            const reply = await client.invoke({op: 'path_remove_directory', dirfd, path});
+            return reply.ok ? ESUCCESS : reply.errno;
+        },
+        async path_unlink_file(dirfd: number, pathPtr: number, pathLen: number): Promise<number> {
+            const path = mem.readString(pathPtr, pathLen);
+            const reply = await client.invoke({op: 'path_unlink_file', dirfd, path});
+            return reply.ok ? ESUCCESS : reply.errno;
+        },
+        async path_rename(
+            dirfd: number, fromPtr: number, fromLen: number,
+            toDirfd: number, toPtr: number, toLen: number,
+        ): Promise<number> {
+            const from = mem.readString(fromPtr, fromLen);
+            const to = mem.readString(toPtr, toLen);
+            const reply = await client.invoke({op: 'path_rename', dirfd, from, toDirfd, to});
+            return reply.ok ? ESUCCESS : reply.errno;
+        },
     };
 }
 
-export interface BootOpts<S extends StartMessageBase> {
+export interface BootOpts<S extends StartMessage> {
     readonly io: RunnerIo;
-    readonly extraImports: (start: S, mem: MemoryAccessors) => Record<string, unknown>;
-    readonly fdHas: (start: S, fd: number) => boolean;
+    readonly wrapImports: (raw: Record<string, unknown>) => Record<string, unknown>;
     readonly runStart: (instance: WebAssembly.Instance) => Promise<void> | void;
 }
 
-export function bootRunner<S extends StartMessageBase>(opts: BootOpts<S>): void {
+export function bootRunner<S extends StartMessage>(opts: BootOpts<S>): void {
+    const replyHandlers: Array<(r: SyscallReply) => void> = [];
+    const client = new SyscallClient({
+        sendRequest(env) { opts.io.postMessage(env); },
+        onReply(h) { replyHandlers.push(h); },
+    });
+
     opts.io.onMessage(msg => {
-        if (msg && typeof msg === 'object' && msg.type === 'start') {
-            void runStart(msg as S);
+        if (msg && typeof msg === 'object') {
+            if (msg.type === 'syscallReply') {
+                for (const h of replyHandlers) h(msg as SyscallReply);
+                return;
+            }
+            if (msg.type === 'start') {
+                void runStart(msg as S);
+                return;
+            }
         }
     });
 
@@ -162,16 +387,11 @@ export function bootRunner<S extends StartMessageBase>(opts: BootOpts<S>): void 
         let memory: WebAssembly.Memory | null = null;
         const mem = memoryAccessors(() => memory);
 
+        const raw = wasiPreview1<S>({start, client, mem});
+        const wasiImports = opts.wrapImports(raw);
+
         const imports: WebAssembly.Imports = {
-            wasi_snapshot_preview1: {
-                ...basePreview1({
-                    args: start.args,
-                    env: start.env,
-                    mem,
-                    fdHas: fd => opts.fdHas(start, fd),
-                }),
-                ...opts.extraImports(start, mem),
-            } as WebAssembly.ModuleImports,
+            wasi_snapshot_preview1: wasiImports as WebAssembly.ModuleImports,
         };
 
         let exitCode = 0;

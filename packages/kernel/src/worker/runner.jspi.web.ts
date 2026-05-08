@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
-import {bootAtomicsRunner} from "./atomics.ts";
+import {bootJspiRunner} from "./jspi.ts";
 
-bootAtomicsRunner({
+bootJspiRunner({
     onMessage(handler) {
         self.addEventListener('message', e => handler((e as MessageEvent).data));
     },
