@@ -1,0 +1,11 @@
+node_modules/
+dist/
+build/
+zig-cache/
+zig-out/
+.zig-cache/
+.DS_Store
+*.log
+.env
+.env.local
+bun.lockb
