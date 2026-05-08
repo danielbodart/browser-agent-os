@@ -5,36 +5,52 @@ Env-agnostic TypeScript core. No Bun-specific or browser-specific code; both run
 ## Public API
 
 ```ts
-import {application} from "@browser-agent-os/kernel";
+import {application, AtomicsTransport} from "@browser-agent-os/kernel";
 
+const transport = new AtomicsTransport({workerFactory, runnerUrl});
 const app = application({
     binaryResolver: name => new URL(`/bin/${name}`, baseUrl),
-    workerFactory: () => new Worker(workerUrl),
+    transport,
 });
 
-const result = await app.kernel.spawn("echo", ["hello", "world"]);
-// { stdout: Uint8Array("hello world\n"), stderr: ..., exitCode: 0 }
+// Single process — fd 0 is closed (immediate EOF), 1 + 2 captured into result.
+const r = await app.kernel.spawn("echo", ["hello"]);
+// r = { stdout: "hello\n", stderr: "", exitCode: 0 }
+
+// Pipeline — caller wires fd 1 of producer to fd 0 of consumer.
+const {readEnd, writeEnd} = app.kernel.pipe();
+const [, catRes] = await Promise.all([
+    app.kernel.spawn("echo", ["hello"], {}, new Map([[1, writeEnd]])),
+    app.kernel.spawn("cat",  [],        {}, new Map([[0, readEnd]])),
+]);
 ```
 
 ## Layout
 
-- `Kernel.ts` — `Kernel` interface
-- `LocalKernel.ts` — implementation; spawns a Worker per process
+- `Kernel.ts` — `Kernel` interface (`pipe()`, `spawn()`)
+- `LocalKernel.ts` — orchestrates per-process FdMap, allocates collector pipes for unmapped 1/2, drains them into `ProcessResult`
 - `Application.ts` — yadic composition factory
-- `Process.ts` — `ProcessResult` type
-- `worker/runner.ts` — Web Worker entry; instantiates the WASM guest with the WASI preview 1 import surface
-- `wasi/Errno.ts` / `wasi/Filetype.ts` — WASI preview 1 constants
+- `Process.ts` — `ProcessResult`
+- `pipe/Pipe.ts` — `PipeEnd` / `Pipe` / `FdMap` types and `DEFAULT_PIPE_CAPACITY` (64 KiB)
+- `pipe/PipeBuffer.ts` — `PipeBuffer` interface + `JsPipeBuffer` (plain async, used by JSPI transport)
+- `pipe/AtomicsPipeBuffer.ts` — `SharedArrayBuffer` ring buffer used by Atomics transport
+- `transport/Transport.ts` — interface: pipe / drain / closeWriteEnd / spawn
+- `transport/AtomicsTransport.ts` — SAB transport; workers run `worker/runner.atomics.ts`
+- `transport/JSPITransport.ts` — kernel-resident buffer + worker RPC; workers run a host-supplied script that calls `bootJspiRunner`
+- `transport/MessagingWorker.ts` — runtime-agnostic Worker shape (Bun web-Worker / Node `worker_threads` adapt to it)
+- `worker/runner.atomics.ts` — Bun web-Worker entry; sync `Atomics.wait` syscalls on the SAB
+- `worker/jspi.ts` — `bootJspiRunner({onMessage, postMessage})` — env-agnostic JSPI guest entry; consumers wire it to the runtime's messaging primitive
+- `wasi/Errno.ts` / `wasi/Filetype.ts` — preview-1 constants
 
 ## Scope (today)
 
-- WASI preview 1 import shim covering everything a Zig `_start` echo needs: args, environ, fd_write/pwrite/read/pread, fd_close/seek/tell/fdstat_get, fd_prestat_get (no preopens), clock_time_get, random_get, proc_exit, plus ENOSYS stubs for unimplemented operations.
-- Stdout/stderr buffered worker-local; flushed via `postMessage` on `proc_exit`.
-- One Worker per process. Worker terminates after exit.
+- WASI preview 1 import shim: args, environ, fd_write/pwrite/read/pread, fd_close/seek/tell/fdstat_get, clock_time_get, random_get, proc_exit; ENOSYS for path_*, sock_*, signals.
+- Lower-level pipe primitive: `Kernel.pipe()` returns `{readEnd, writeEnd}`; `Kernel.spawn(..., fds)` overrides individual guest fds. No `spawnPipeline` — callers compose.
+- Two transports behind one interface; same contract suite green against both.
 
 ## Not yet
 
 - OPFS / persistent filesystem
-- JSPI sync-over-async transport (lands with OPFS + pipes)
-- Pipes / FIFOs / cross-worker stdio
-- `browser_agent_os_ext::spawn` extension
+- `path_open` and friends (Stage 2)
+- `browser_agent_os_ext::spawn` extension for in-guest process spawn (Stage 4)
 - Allium specs

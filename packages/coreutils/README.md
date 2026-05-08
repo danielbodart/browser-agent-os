@@ -12,6 +12,7 @@ Outputs:
 
 ```
 zig-out/bin/echo.wasm
+zig-out/bin/cat.wasm
 ```
 
 ## Add a new binary

@@ -49,9 +49,12 @@ The browser tab boots a TypeScript runtime (`@browser-agent-os/kernel`) that exp
 
 ## Status
 
-MVP — `echo` runs end-to-end. Bun host serves wasm32-wasi binaries; kernel
-spawns guests in real Web Workers; stdout flows back through a worker-local
-buffer postMessage'd on `proc_exit`. No xterm, no OPFS, no pipes yet.
+Stage 1 done — `echo hello | cat` runs end-to-end through real concurrent
+inter-process pipes under both transports:
+`AtomicsTransport` (Bun, `SharedArrayBuffer` + `Atomics.wait`/`notify`) and
+`JSPITransport` (Node subprocess, `WebAssembly.Suspending` + `promising`).
+Kernel exposes `pipe()` + `spawn(..., fds)` as a lower-level substrate;
+backpressure verified at 64 KiB. No xterm, no OPFS, no shell yet.
 
 ## Inspiration
 

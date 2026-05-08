@@ -23,32 +23,33 @@ When a stage closes, mark it `[done]` here and move its open questions into the 
 
 ---
 
-## Stage 1 — Pipes + JSPI transport
+## Stage 1 — `[done]` Pipes + JSPI transport
 
 **Goal:** Real concurrent inter-process pipes. `a | b` runs `a` and `b` as separate Workers with a kernel-resident bounded byte buffer between them. Producer's `fd_write` blocks when buffer full; consumer's `fd_read` blocks when empty. Mirrors POSIX semantics; no tmpfile shims.
 
 This is the stage that forces the JSPI question because `fd_write` and `fd_read` must return synchronously to WASM but the operation is async (waits on the other worker).
 
-**Deliverables:**
-- `packages/kernel/src/transport/Transport.ts` interface — bridges async kernel calls to sync WASM imports
-- `packages/kernel/src/transport/JSPITransport.ts` — uses `WebAssembly.Suspending` + `WebAssembly.promising`
-- `packages/kernel/src/transport/AtomicsTransport.ts` — SAB + `Atomics.wait`/`notify` fallback for environments without JSPI
-- `packages/kernel/src/pipe/PipeBuffer.ts` — bounded byte buffer (target 64 KiB, `PIPE_BUF` 4096 atomic-write guarantee)
-- `packages/kernel/src/Process.ts` extended: each process owns an `FdTable`; pipes hand the same `PipeBuffer` to writer fd of A and reader fd of B
-- `LocalKernel.spawnPipeline(commands: Array<{binary, args}>)` API
-- `packages/host-bun/test/jspi/runner.mjs` — Node subprocess runner used by tests that exercise JSPI; spawned via `Bun.spawn(['node', '--experimental-wasm-jspi', '...'])`
-- Contract test suite parameterised by transport — same suite runs against both transports
+**What landed:**
+- `packages/kernel/src/transport/Transport.ts` — interface; allocates pipes, drains read ends, spawns guest workers
+- `packages/kernel/src/transport/JSPITransport.ts` — kernel-resident `JsPipeBuffer`; worker RPCs back via `WebAssembly.Suspending` / `WebAssembly.promising`
+- `packages/kernel/src/transport/AtomicsTransport.ts` — `SharedArrayBuffer` ring buffer; workers operate on same SAB with `Atomics.wait` / `notify`; kernel main thread uses `Atomics.waitAsync`
+- `packages/kernel/src/pipe/PipeBuffer.ts` + `AtomicsPipeBuffer.ts` — 64 KiB capacity by default
+- `packages/kernel/src/worker/runner.atomics.ts` — Bun web-Worker runner with sync `Atomics.wait` syscalls
+- `packages/kernel/src/worker/jspi.ts` — env-agnostic JSPI runner (consumed by `host-bun/test/jspi/worker.mjs` for Node)
+- `Kernel.pipe()` + `Kernel.spawn(binary, args, env, fds)` — lower-level substrate; no `spawnPipeline` invented (callers compose directly, matching what `browser_agent_os_ext::spawn` will expose to guests in Stage 4)
+- `packages/coreutils/src/cat/` — stdin → stdout
+- `packages/host-bun/test/pipe.contract.ts` — shared scenarios; consumed by `pipe.atomics.test.ts` (in-process Bun) and the Node subprocess `jspi/runner.mjs` (spawned via `Bun.spawn` with `--experimental-wasm-jspi --experimental-transform-types`)
 
-**Acceptance:**
-- `echo hello | cat` produces `hello\n` on stdout. `cat` is a new coreutils binary added in this stage.
-- Backpressure test: a producer writing >64 KiB without a consumer must suspend (verified by checking the producer hasn't called `proc_exit` yet).
-- Same contract test suite is green against `AtomicsTransport` (in Bun) and `JSPITransport` (via Node subprocess).
+**Acceptance — verified:**
+- `echo hello | cat` produces `hello\n` (both transports)
+- Backpressure: 128 KiB write to a pipe with no consumer blocks the producer; buffer pegs at capacity; spawning `cat` drains and lets producer finish (both transports)
+- Same `CONTRACT_CASES` array is green against `AtomicsTransport` (in Bun) and `JSPITransport` (Node subprocess)
 
-**Open questions:**
-- Does Node's `--experimental-wasm-jspi` need any module-loading flags? Confirm exact invocation.
-- Where does the `PipeBuffer` live when the kernel runs in the main thread vs in a worker? For Bun tests the kernel is in-process; for browser later it might still be main thread.
-- `PIPE_BUF` size — start with Linux default 4096, or smaller (e.g. 1024) so backpressure shows up faster in tests?
-- How do we model EOF — close-on-write-end-drop, or explicit `fd_close` on the writer fd?
+**Open questions — resolved:**
+- *Node module-loading flags:* `--experimental-wasm-jspi` cannot be set per-worker (rejected by `worker_threads`); set it on the parent Node process and workers inherit. `--experimental-transform-types` (parent + workers) handles parameter-property TS syntax that bare strip-types rejects. `--no-warnings` silences the `ExperimentalWarning` noise.
+- *Where the `PipeBuffer` lives:* `JsPipeBuffer` lives in the kernel main thread (workers RPC into it via Suspending). `AtomicsPipeBuffer` lives in shared memory; both kernel and workers touch the same SAB — kernel main thread uses `waitAsync`, workers use sync `wait`.
+- *Capacity:* 64 KiB matches the roadmap target; exposed as `DEFAULT_PIPE_CAPACITY`.
+- *EOF model:* implicit close-on-writer-`proc_exit`. `LocalKernel.spawn` iterates the merged FdMap on worker exit and calls `transport.closeWriteEnd(end)` for every write end; consumers then observe a 0-byte read.
 
 ---
 
