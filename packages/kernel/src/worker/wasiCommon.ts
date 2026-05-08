@@ -298,10 +298,10 @@ export function wasiPreview1<S extends StartMessage>(opts: {
                 off += headerLen;
                 const nameRoom = Math.min(nameBytes.length, bufLen - off);
                 if (nameRoom > 0) mem.u8().set(nameBytes.subarray(0, nameRoom), bufPtr + off);
-                off += nameBytes.length;
-                if (off > bufLen) { off = bufLen; break; }
+                off += nameRoom;
+                if (nameRoom < nameBytes.length) break;
             }
-            mem.view().setUint32(bufUsedPtr, Math.min(off, bufLen), true);
+            mem.view().setUint32(bufUsedPtr, off, true);
             return ESUCCESS;
         },
         async path_open(

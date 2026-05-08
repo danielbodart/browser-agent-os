@@ -10,6 +10,8 @@ Bun host: dev server + test scaffolding for the browser-agent-os kernel.
 - `test/fs.contract.ts` — shared FileSystem contract suite
 - `test/memoryFs.test.ts` — runs the FS contract against `MemoryFs`
 - `test/cat-file.test.ts` — `cat <file>` integration: spawns `cat.wasm` against `MemoryFs`-backed kernel
+- `test/opfs/` — browser bundles + Bun-served `index.html` driving the OpfsFs contract in headless Chrome
+- `test/opfsFs.test.ts` — Bun test: builds the bundles, serves them, drives Playwright Chrome, asserts the FS contract + a persistence-across-respawn case
 
 ## Run
 

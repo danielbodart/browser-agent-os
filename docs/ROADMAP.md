@@ -53,48 +53,64 @@ This is the stage that forces the JSPI question because `fd_write` and `fd_read`
 - *Capacity:* 64 KiB matches the roadmap target; exposed as `DEFAULT_PIPE_CAPACITY`.
 - *EOF model:* implicit close-on-writer-`proc_exit`. `LocalKernel.spawn` iterates the merged FdMap on worker exit and calls `transport.closeWriteEnd(end)` for every write end; consumers then observe a 0-byte read.
 
+**Retired in Stage 2:** `AtomicsTransport` + the Node subprocess JSPI test rig. Bun 1.3.13 ships JSPI, so `JSPITransport` runs in-process and inside `Bun.Worker` — single transport, single runner, single contract suite green under Bun.
+
 ---
 
-## Stage 2 — Filesystem abstraction + memory FS
+## Stage 2 — `[done]` Filesystem abstraction + memory FS
 
 **Goal:** Introduce the `FileSystem` interface and a `MemoryFs` implementation. Kernel can serve `path_open`, `fd_read`, `fd_write`, `fd_filestat_get`, `fd_close` against it. Coreutils can read files. Still no OPFS.
 
-**Deliverables:**
-- `packages/kernel/src/fs/FileSystem.ts` — interface (open, read, write, stat, close)
-- `packages/kernel/src/fs/MemoryFs.ts` — in-process tree of files/dirs, no async
-- `packages/kernel/src/fs/Path.ts` — resolution, normalisation, no symlinks
-- WASI shim wires `path_open` / `fd_*` through `FileSystem`
-- New coreutils binary: `cat <file>` reads a path
-- `Application.ts` accepts `fs` as a dependency
+**What landed:**
+- `packages/kernel/src/fs/FileSystem.ts` — async `FileSystem` (open, opendir, stat, mkdir, rmdir, unlink, rename) + `FileHandle` (read/write at offset, truncate, stat, sync, close) + `DirHandle` + `FsError`
+- `packages/kernel/src/fs/MemoryFs.ts` — in-process tree, async-shaped
+- `packages/kernel/src/fs/Path.ts` — `normalize` / `resolve` / `dirname` / `basename` / `split`; no symlinks; never escapes root
+- `packages/kernel/src/fd/FdTable.ts` + `FdEntry.ts` — per-process kernel-side fd table, dynamic allocation for `path_open`
+- `packages/kernel/src/syscall/Syscalls.ts` + `SyscallHandler.ts` + `wire.ts` — generic syscall RPC; kernel-side dispatch over `FdTable` + `FileSystem` + transport pipes
+- `packages/kernel/src/worker/SyscallClient.ts` — worker-side RPC client
+- `packages/kernel/src/worker/wasiCommon.ts` — WASI shim: `path_open`, `fd_read/write/seek/tell/close/sync/readdir/filestat_get/filestat_set_size/pread/pwrite`, `path_create_directory/remove_directory/unlink_file/rename/filestat_get`. Async ops are `Suspending` imports.
+- `LocalKernel` builds the per-process `FdTable` (pipe entries from caller fds + fd 3 = `/` preopen) and a `SyscallHandler` per spawn; passes them to `Transport.spawn`
+- `Application` takes `fs: FileSystem` as a yadic dependency
+- `cat` extended: positional file args; `-` means stdin; missing file → stderr + exit 1
+- `host-bun/test/fs.contract.ts` — shared FS contract suite (9 cases)
+- `host-bun/test/memoryFs.test.ts` — runs the contract against `MemoryFs`
+- `host-bun/test/cat-file.test.ts` — `cat <file>` integration vs `MemoryFs`-backed kernel
 
-**Acceptance:**
-- `kernel.spawn('cat', ['/tmp/hello.txt'])` after `fs.write('/tmp/hello.txt', 'hi\n')` returns stdout `hi\n`.
-- `cat` of a missing file produces `cat: /no.txt: No such file or directory` to stderr and exit code 1.
+**Also dropped this stage:**
+- `AtomicsTransport`, `AtomicsPipeBuffer`, `worker/atomics.ts`, `runner.atomics.web.ts`, `pipe.atomics.test.ts` — Bun 1.3.13 ships JSPI globals (`WebAssembly.Suspending` / `promising`); JSPI runs in-process inside Bun and inside `Bun.Worker`. The Node subprocess test rig (`test/jspi/`) is gone too. Single transport, single runner entry (`worker/runner.jspi.web.ts`), single contract suite green in-process under Bun.
 
-**Open questions:**
-- Preopens: do we expose `/` directly, or follow WASI convention with `/` mapped to fd 3? Probably 3.
-- Permission rights bitmask — start permissive (all rights) and tighten later, or start strict?
+**Acceptance — verified:**
+- `kernel.spawn('cat', ['/hello.txt'])` after `MemoryFs` `open`/`write` of `/hello.txt` returns stdout `hi\n`, exit 0.
+- `cat /no.txt` → stderr `cat: /no.txt: No such file or directory`, exit 1.
+
+**Open questions — resolved:**
+- *Preopens:* fd 3 = `/`. `LocalKernel` allocates a `dir` `FdEntry` for fd 3 from `fs.opendir('/')` per spawn. Worker shim handles `fd_prestat_get` / `fd_prestat_dir_name` locally from the start-message preopen list (no RPC).
+- *Rights bitmask:* permissive (all bits set in `fd_fdstat_get`). Worker decodes guest-supplied rights into `OpenFlags.read`/`write`; if zero (libc default), defaults to read+write.
+- *Inode:* `fd_filestat_get` reports `ino = guestFd`, `path_filestat_get` reports `ino = 0`. No IndexedDB sidecar.
+- *Errno bridging:* `FsError` thrown by `FileSystem` impls is unwrapped in `JSPITransport.serviceSyscall` alongside `SyscallError`; raw exceptions become `EIO`.
 
 ---
 
-## Stage 3 — OPFS filesystem (browser-only)
+## Stage 3 — `[done]` OPFS filesystem (browser-only)
 
 **Goal:** Second `FileSystem` implementation backed by OPFS sync access handles. Same contract tests must pass against both `MemoryFs` and `OpfsFs`.
 
-**Deliverables:**
-- `packages/kernel/src/fs/OpfsFs.ts` — opens `FileSystemSyncAccessHandle` per file (sync ops in Worker after async open)
-- File handle cache + LRU close policy (sync handles hold an exclusive lock)
-- Browser-only test runner that mounts `OpfsFs` and runs the contract suite (this is where the browser host scaffolding starts to materialise — see Stage 5)
-- Persistence: a write that exits should be visible across spawns
+**What landed:**
+- `packages/kernel/src/fs/OpfsFs.ts` — kernel-side `FileSystem` proxy. Posts requests to a backend (anything implementing `OpfsFsBackend`); `FileHandle` / `DirHandle` instances RPC through the same backend.
+- `packages/kernel/src/fs/opfsBackend.ts` — `bootOpfsBackend(io)` runs inside an OPFS-capable Worker. Hosts `FileSystemSyncAccessHandle`s, services every `FileSystem` op + per-handle file/dir ops. Handler registered synchronously and queues messages while `navigator.storage.getDirectory()` resolves.
+- `packages/kernel/src/fs/runner.opfs.web.ts` — web-Worker entry; wires `self` to `bootOpfsBackend`.
+- `packages/host-bun/test/opfs/` — `page.ts` (page-side runner), `worker-entry.ts` (FS Worker), `opfsServer.ts` (Bun.build the bundles + serve `index.html` / `page.js` / `opfs-worker.js`).
+- `packages/host-bun/test/opfsFs.test.ts` — Bun test: spins up the test server, drives Playwright Chromium, navigates, waits for `document.title === 'done'`, asserts each contract case + persistence.
 
-**Acceptance:**
-- Same contract test suite from Stage 2 passes against `OpfsFs` in headless Chrome (Playwright spawned as a Node subprocess from Bun tests).
-- After-write-then-respawn: write a file in process A, spawn process B that reads it, content matches.
+**Acceptance — verified:**
+- All 9 cases from `fs.contract.ts` pass against `OpfsFs` in headless Chrome, run inline from `bun test` (Playwright launched in-process; no Node subprocess).
+- Persistence: write `/persist.txt` via one `OpfsFs` instance (fresh FS Worker), construct another `OpfsFs` with a fresh FS Worker, read same path, content matches.
 
-**Open questions:**
-- Sync handle lifecycle: open per `path_open`, close per `fd_close`, or pool? Pool likely needed because the cost of `getFileHandle` + `createSyncAccessHandle` is non-trivial.
-- Concurrent access: WASI semantics allow multiple fds to one file; OPFS default `readwrite` mode is exclusive. Use `readwrite-unsafe` for shared writes, or serialise through the kernel?
-- Where do we store inode numbers / metadata if we want them? jswasi uses an IndexedDB sidecar — we said we want to avoid that. Decide whether `fd_filestat_get` returning inode `0` is acceptable.
+**Open questions — resolved:**
+- *Sync handle lifecycle:* per-open. `path_open` → `getFileHandle` + `createSyncAccessHandle`; `fd_close` closes the sync handle. No pool; perf review deferred until Stage 6 coreutils exercise the FS harder.
+- *Concurrent access:* serialised through the kernel. Single FS Worker hosts all sync handles; default exclusive `readwrite` mode; multiple guest fds to the same path simply mean multiple sync handles, but all coordinated by the same backend (currently one handle per open file, which would conflict — acceptable for Stage 3 since coreutils don't exercise that path; revisit alongside the pool decision).
+- *Inode/metadata:* `fd_filestat_get` returns `ino = guestFd`, no IndexedDB sidecar. Acceptable for now.
+- *Test runner:* Playwright runs in-process under Bun (`import {chromium} from "playwright"`). Roadmap originally said "Node subprocess from Bun tests" — Bun runs Playwright fine, no subprocess needed.
 
 ---
 

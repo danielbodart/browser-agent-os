@@ -9,6 +9,11 @@ export type {MessagingWorker, MessagingWorkerFactory} from "./transport/Messagin
 export {JSPITransport, type JSPITransportDependencies} from "./transport/JSPITransport.ts";
 export {bootJspiRunner} from "./worker/jspi.ts";
 export type {RunnerIo} from "./worker/wasiCommon.ts";
+export {SyscallClient, type SyscallChannel} from "./worker/SyscallClient.ts";
+export {FdTable} from "./fd/FdTable.ts";
+export type {FdEntry, FileFdEntry, DirFdEntry, PipeFdEntry} from "./fd/FdEntry.ts";
+export {SyscallHandler, SyscallError, type PipeBufferLookup} from "./syscall/SyscallHandler.ts";
+export type {Syscalls, ReadResult, WriteResult, DirReadEntry} from "./syscall/Syscalls.ts";
 export type {
     FileSystem,
     FileHandle,
@@ -19,4 +24,6 @@ export type {
 } from "./fs/FileSystem.ts";
 export {FsError} from "./fs/FileSystem.ts";
 export {MemoryFs} from "./fs/MemoryFs.ts";
+export {OpfsFs, type OpfsFsBackend} from "./fs/OpfsFs.ts";
+export {bootOpfsBackend} from "./fs/opfsBackend.ts";
 export * as Path from "./fs/Path.ts";

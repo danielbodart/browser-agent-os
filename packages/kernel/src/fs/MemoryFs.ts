@@ -43,10 +43,8 @@ export class MemoryFs implements FileSystem {
 
     async open(path: string, flags: OpenFlags): Promise<FileHandle> {
         const norm = normalize(path);
-        if (norm === '/') {
-            if (flags.directory) throw new FsError(EISDIR, `is a directory: ${path}`);
-            throw new FsError(EISDIR, `is a directory: ${path}`);
-        }
+        if (norm === '/') throw new FsError(EISDIR, `is a directory: ${path}`);
+        if (flags.directory) throw new FsError(EISDIR, `directory open via open() not supported`);
         const parent = this.parentDir(norm);
         const name = basename(norm);
         let node = parent.children.get(name);
