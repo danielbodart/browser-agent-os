@@ -4,6 +4,7 @@ export type {Kernel} from "./Kernel.ts";
 export type {ProcessResult} from "./Process.ts";
 export type {Pipe, PipeEnd, FdMap} from "./pipe/Pipe.ts";
 export {DEFAULT_PIPE_CAPACITY} from "./pipe/Pipe.ts";
+export type {PipeBuffer} from "./pipe/PipeBuffer.ts";
 export type {Transport, TransportSpawnOpts, TransportSpawnResult} from "./transport/Transport.ts";
 export type {MessagingWorker, MessagingWorkerFactory} from "./transport/MessagingWorker.ts";
 export {JSPITransport, type JSPITransportDependencies} from "./transport/JSPITransport.ts";

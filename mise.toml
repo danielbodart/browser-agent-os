@@ -52,6 +52,11 @@ description = "Bun dev server (serves coreutils + kernel)"
 depends = ["build:bins"]
 run = "bun --hot run packages/host-bun/src/app.ts"
 
+[tasks."dev:browser"]
+description = "Browser host: xterm.js + kernel in a real tab (http://localhost:3000)"
+depends = ["build:bins"]
+run = "bun --hot run packages/host-browser/src/main.ts"
+
 [tasks."clean"]
 description = "Remove all build artefacts"
 run = "rm -rf packages/coreutils/zig-out packages/coreutils/.zig-cache packages/shell/zig-out packages/shell/.zig-cache packages/*/dist"

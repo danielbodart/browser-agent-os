@@ -154,25 +154,36 @@ This is the stage that forces the JSPI question because `fd_write` and `fd_read`
 
 ---
 
-## Stage 5 — Browser host package
+## Stage 5 — `[done]` Browser host package
 
 **Goal:** Make the kernel run in a real browser tab with xterm.js. Until now everything ran in Bun + Node subprocess.
 
-**Deliverables:**
-- `packages/host-browser/` — composition root for the browser
-- `index.html` mounting xterm.js, wiring its input/output to the shell process's stdin/stdout
-- `packages/host-browser/src/app.ts` — yadic composition: `JSPITransport` + `OpfsFs` + `Worker` factory pointing at the kernel runner
-- Vite or just `Bun.serve` static page from the existing host-bun (decide which)
-- COOP/COEP headers if SAB is needed for `AtomicsTransport` fallback (with JSPI as primary, may not be needed)
+**What landed:**
+- `packages/host-browser/` — composition root for the browser. `src/app.ts` wires `JSPITransport` + `OpfsFs` + `LocalKernel` via `application(deps)`, spawns `sh -i` with explicit stdin/stdout/stderr pipes wired to xterm. `src/server.ts` `Bun.build`s three browser bundles (app + JSPI runner + OPFS runner) and serves them; `src/main.ts` is the runnable dev server combining browser routes with `host-bun`'s binary `server()` for `/bin/*`. `src/lineDiscipline.ts` is a cooked-mode TTY (echo, Backspace, send-on-Enter) — the line-editing layer lives in the host page (kernel side), not in the shell, mirroring the conventional Unix arrangement where the TTY driver does cooked mode and the shell sees full lines.
+- `packages/coreutils/src/ls/` — added so manual testing can `ls` and `cd`. Hand-rolled WASI `path_open` + `fd_readdir` with an `extern struct Dirent` for the WASI dirent layout.
+- `packages/shell/src/main.zig` — converted batch `readAllStdin` loop into a true REPL: line-by-line `readRaw` (direct WASI `fd_read` extern; `std.Io.File.stdin().reader().readSliceShort` hung after the first batch in the JSPI/async-pipe environment), `LineReader` struct, `-i` flag for `cwd $ ` prompt, `normalizePath` helper so `cd ..` resolves correctly. The new `readRaw` extern coexists with the existing `path_open`/`fd_close`/`fd_pipe` externs.
+- `packages/host-bun/src/index.ts` — re-exports `server` and `webWorkerFactory` (also imported by `host-browser`). `package.json` `main` switched from `./src/app.ts` to `./src/index.ts`; `app.ts` remains the runnable script for `mise run dev`.
+- `packages/kernel/src/index.ts` — added `export type {PipeBuffer}` (host-browser drains stdout/stderr via `transport.pipeBuffer(end).read()`).
+- `mise.toml` — `dev:browser` task that depends on `build:bins` and runs the host-browser dev server on port 3000.
+- `packages/host-browser/test/host-browser.smoke.test.ts` — Playwright (headless Chrome via Bun test) drives three cases: `echo hello | cat` produces `hello`, `echo > /a.txt` then `ls /` shows `a.txt`, write → reload → cat persists across an OPFS instance respawn.
 
-**Acceptance:**
-- `mise run dev` opens `http://localhost:3000` in browser. Terminal renders. `sh` is the foreground process. Typing `echo hello | cat` produces `hello\n` followed by prompt.
-- Refresh the page after writing a file in OPFS — file persists.
+**Acceptance — verified:**
+- `mise run dev:browser` serves http://localhost:3000; the page mounts xterm with a `/$ ` prompt; typing `echo hello | cat` and Enter produces `hello\n` followed by the next prompt.
+- `echo persisted > /persist.txt`, reload, `cat /persist.txt` — file persists across page reloads via OPFS.
+- All 38 tests across 6 files pass under `mise run test`, including the 3 new headless Chrome smoke cases.
 
-**Open questions:**
-- Bundling: do we ship raw `.ts` to the browser via Bun's transpile, or add a real bundler step? Bun's `Bun.build` probably enough.
-- Service worker for COOP/COEP — only needed if `AtomicsTransport` is used as fallback. With JSPI-only deployment, not needed.
-- xterm.js dep: `@xterm/xterm` (modern). Add to host-browser only.
+**Open questions — resolved:**
+- *Bundling:* `Bun.build({target: 'browser', format: 'esm'})` handles app + worker entries with no extra tooling; xterm CSS served from `node_modules`. Vite would buy nothing at this stage.
+- *Cross-origin isolation:* skipped. JSPI does not require COOP/COEP, OPFS sync access handles only require a dedicated worker (which `runner.opfs.web.ts` already is). No SharedArrayBuffer anywhere in the kernel since Stage 2.
+- *Shell interactivity:* shell now exposes `-i`. Tests don't pass `-i` (no prompt) so existing batch tests stay green; browser host passes `-i`.
+- *Line discipline location:* host page, not shell. Cooked-mode equivalent. Raw mode would need a TTY layer + a `browser_agent_os_ext` op to switch modes — deferred until a program (e.g., editor) actually needs it.
+- *Stdin reader bug:* `std.Io.File.stdin().reader(io, &rbuf).interface.readSliceShort` hangs after the first non-trivial read inside a JSPI worker. Worked around with a direct WASI `fd_read` extern. Worth filing upstream; for now the workaround is local to the shell and `ls` is unaffected (it only reads the directory fd, not stdin).
+- *xterm.js package:* `@xterm/xterm` 5.5+ added to host-browser only.
+
+**Known limitations (deferred):**
+- No Ctrl-C / signal handling. Pressing `Ctrl-C` in xterm just sends `\x03` into the line buffer. `proc_kill` ext op + worker termination semantics deferred to Stage 6 alongside coreutils growth.
+- Tab character is sent into the buffer but xterm renders it as cursor advancement, so visual position can drift after Backspace following a Tab. Cosmetic.
+- Pipe-end leak in `JSPITransport.ends` from Stage 4 still applies (host-browser doesn't make it worse).
 
 ---
 

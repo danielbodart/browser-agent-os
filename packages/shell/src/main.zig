@@ -50,6 +50,26 @@ extern "wasi_snapshot_preview1" fn path_open(
 
 extern "wasi_snapshot_preview1" fn fd_close(fd: i32) u32;
 
+const Iovec = extern struct {
+    buf: [*]u8,
+    buf_len: u32,
+};
+
+extern "wasi_snapshot_preview1" fn fd_read(
+    fd: i32,
+    iovs_ptr: [*]const Iovec,
+    iovs_len: u32,
+    nread_out: *u32,
+) u32;
+
+fn readRaw(fd: i32, buf: []u8) !usize {
+    var nread: u32 = 0;
+    var iovs = [_]Iovec{.{.buf = buf.ptr, .buf_len = @intCast(buf.len)}};
+    const e = fd_read(fd, &iovs, 1, &nread);
+    if (e != 0) return error.ReadFailed;
+    return @intCast(nread);
+}
+
 const PREOPEN_FD: i32 = 3;
 const OFLAG_CREAT: u32 = 0x1;
 const OFLAG_TRUNC: u32 = 0x8;
@@ -274,32 +294,55 @@ fn runBuiltin(sh: *Shell, argv: []const []const u8) !BuiltinResult {
     unreachable;
 }
 
-fn setCwd(sh: *Shell, target: []const u8) !void {
-    // No path normalisation — kernel paths are absolute strings and we don't
-    // currently resolve `..`. Callers should pass absolute paths or simple names.
+fn normalizePath(allocator: std.mem.Allocator, base: []const u8, target: []const u8) ![]const u8 {
+    var work: std.ArrayList(u8) = .empty;
+    defer work.deinit(allocator);
     if (target.len > 0 and target[0] == '/') {
-        sh.cwd.clearRetainingCapacity();
-        try sh.cwd.appendSlice(sh.allocator, target);
-        return;
+        try work.appendSlice(allocator, target);
+    } else {
+        try work.appendSlice(allocator, base);
+        if (work.items.len == 0 or work.items[work.items.len - 1] != '/') {
+            try work.append(allocator, '/');
+        }
+        try work.appendSlice(allocator, target);
     }
-    if (sh.cwd.items.len == 0 or sh.cwd.items[sh.cwd.items.len - 1] != '/') {
-        try sh.cwd.append(sh.allocator, '/');
+
+    var stack: std.ArrayList([]const u8) = .empty;
+    defer stack.deinit(allocator);
+    var it = std.mem.splitScalar(u8, work.items, '/');
+    while (it.next()) |seg| {
+        if (seg.len == 0 or std.mem.eql(u8, seg, ".")) continue;
+        if (std.mem.eql(u8, seg, "..")) {
+            if (stack.items.len > 0) _ = stack.pop();
+            continue;
+        }
+        try stack.append(allocator, seg);
     }
-    try sh.cwd.appendSlice(sh.allocator, target);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    if (stack.items.len == 0) {
+        try out.append(allocator, '/');
+        return out.toOwnedSlice(allocator);
+    }
+    for (stack.items) |seg| {
+        try out.append(allocator, '/');
+        try out.appendSlice(allocator, seg);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn setCwd(sh: *Shell, target: []const u8) !void {
+    const normalized = try normalizePath(sh.allocator, sh.cwd.items, target);
+    defer sh.allocator.free(normalized);
+    sh.cwd.clearRetainingCapacity();
+    try sh.cwd.appendSlice(sh.allocator, normalized);
 }
 
 // ---------------- pipeline execution ----------------
 
 fn resolvePath(sh: *Shell, allocator: std.mem.Allocator, p: []const u8) ![]const u8 {
-    if (p.len > 0 and p[0] == '/') return allocator.dupe(u8, p);
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    try buf.appendSlice(allocator, sh.cwd.items);
-    if (buf.items.len == 0 or buf.items[buf.items.len - 1] != '/') {
-        try buf.append(allocator, '/');
-    }
-    try buf.appendSlice(allocator, p);
-    return buf.toOwnedSlice(allocator);
+    return normalizePath(allocator, sh.cwd.items, p);
 }
 
 fn openRedirect(sh: *Shell, r: Redirect) !i32 {
@@ -470,19 +513,39 @@ fn executePipeline(sh: *Shell, pipeline: *Pipeline) !i32 {
 
 // ---------------- REPL ----------------
 
-fn readAllStdin(allocator: std.mem.Allocator, io: std.Io) !std.ArrayList(u8) {
-    var data: std.ArrayList(u8) = .empty;
-    errdefer data.deinit(allocator);
-    var rbuf: [4096]u8 = undefined;
-    var in = std.Io.File.stdin().reader(io, &rbuf);
-    var chunk: [4096]u8 = undefined;
-    while (true) {
-        const n = try in.interface.readSliceShort(&chunk);
-        if (n == 0) break;
-        try data.appendSlice(allocator, chunk[0..n]);
+const LineReader = struct {
+    pending: std.ArrayList(u8) = .empty,
+    eof: bool = false,
+
+    fn next(self: *LineReader, allocator: std.mem.Allocator) !?[]u8 {
+        var chunk: [256]u8 = undefined;
+        while (true) {
+            if (std.mem.indexOfScalar(u8, self.pending.items, '\n')) |idx| {
+                const line = try allocator.dupe(u8, self.pending.items[0..idx]);
+                const rest = self.pending.items[idx + 1 ..];
+                std.mem.copyForwards(u8, self.pending.items[0..rest.len], rest);
+                self.pending.shrinkRetainingCapacity(rest.len);
+                return line;
+            }
+            if (self.eof) {
+                if (self.pending.items.len == 0) return null;
+                const line = try allocator.dupe(u8, self.pending.items);
+                self.pending.clearRetainingCapacity();
+                return line;
+            }
+            const n = try readRaw(0, &chunk);
+            if (n == 0) {
+                self.eof = true;
+                continue;
+            }
+            try self.pending.appendSlice(allocator, chunk[0..n]);
+        }
     }
-    return data;
-}
+
+    fn deinit(self: *LineReader, allocator: std.mem.Allocator) void {
+        self.pending.deinit(allocator);
+    }
+};
 
 fn runLine(sh: *Shell, line: []const u8) !i32 {
     const trimmed = std.mem.trim(u8, line, " \t\r\n");
@@ -501,18 +564,41 @@ fn runLine(sh: *Shell, line: []const u8) !i32 {
     return executePipeline(sh, &pipeline);
 }
 
+const Args = struct { interactive: bool };
+
+fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Args {
+    var iter = try init.minimal.args.iterateAllocator(allocator);
+    defer iter.deinit();
+    _ = iter.next(); // program name
+    var interactive = false;
+    while (iter.next()) |a| {
+        if (std.mem.eql(u8, a, "-i")) interactive = true;
+    }
+    return .{ .interactive = interactive };
+}
+
+fn writePrompt(sh: *Shell) void {
+    sh.writeOut(sh.cwd.items);
+    sh.writeOut("$ ");
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.wasm_allocator;
+    const args = try parseArgs(init, allocator);
 
     var sh = try Shell.init(allocator, init.io, init.environ_map);
     defer sh.deinit();
 
-    var data = try readAllStdin(allocator, init.io);
-    defer data.deinit(allocator);
+    var reader: LineReader = .{};
+    defer reader.deinit(allocator);
 
     var last_exit: i32 = 0;
-    var it = std.mem.splitScalar(u8, data.items, '\n');
-    while (it.next()) |line| {
+    while (true) {
+        if (args.interactive) writePrompt(&sh);
+        const maybe = try reader.next(allocator);
+        if (maybe == null) break;
+        const line = maybe.?;
+        defer allocator.free(line);
         last_exit = try runLine(&sh, line);
     }
 

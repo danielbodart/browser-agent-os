@@ -7,6 +7,7 @@ const Bin = struct {
 const bins = [_]Bin{
     .{ .name = "echo" },
     .{ .name = "cat" },
+    .{ .name = "ls" },
 };
 
 pub fn build(b: *std.Build) void {

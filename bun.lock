@@ -15,6 +15,15 @@
         "typescript": "^5.7.0",
       },
     },
+    "packages/host-browser": {
+      "name": "@browser-agent-os/host-browser",
+      "version": "0.0.0",
+      "dependencies": {
+        "@browser-agent-os/host-bun": "*",
+        "@browser-agent-os/kernel": "*",
+        "@xterm/xterm": "^5.5.0",
+      },
+    },
     "packages/host-bun": {
       "name": "@browser-agent-os/host-bun",
       "version": "0.0.0",
@@ -31,6 +40,8 @@
   "packages": {
     "@bodar/yadic": ["@jsr/bodar__yadic@0.489.346", "https://npm.jsr.io/~/11/@jsr/bodar__yadic/0.489.346.tgz", {}, "sha512-4ZOooOcrZh++8ffPyJpReT1Rwn6CjsoBYlok6KQkrBrbBUPjYXQ2NhFCk9Oim4+uHdT/LGVyUPvkDQoWYf+Sig=="],
 
+    "@browser-agent-os/host-browser": ["@browser-agent-os/host-browser@workspace:packages/host-browser"],
+
     "@browser-agent-os/host-bun": ["@browser-agent-os/host-bun@workspace:packages/host-bun"],
 
     "@browser-agent-os/kernel": ["@browser-agent-os/kernel@workspace:packages/kernel"],
@@ -38,6 +49,8 @@
     "@types/bun": ["@types/bun@1.3.13", "", { "dependencies": { "bun-types": "1.3.13" } }, "sha512-9fqXWk5YIHGGnUau9TEi+qdlTYDAnOj+xLCmSTwXfAIqXr2x4tytJb43E9uCvt09zJURKXwAtkoH4nLQfzeTXw=="],
 
     "@types/node": ["@types/node@25.6.2", "", { "dependencies": { "undici-types": "~7.19.0" } }, "sha512-sokuT28dxf9JT5Kady1fsXOvI4HVpjZa95NKT5y9PNTIrs2AsobR4GFAA90ZG8M+nxVRLysCXsVj6eGC7Vbrlw=="],
+
+    "@xterm/xterm": ["@xterm/xterm@5.5.0", "", {}, "sha512-hqJHYaQb5OptNunnyAnkHyM8aCjZ1MEIDTQu1iIbbTD/xops91NB5yq1ZK/dC2JDbVWtF23zUtl9JE2NqwT87A=="],
 
     "binaryen": ["binaryen@129.0.0", "", { "bin": { "wasm-as": "bin/wasm-as", "wasm2js": "bin/wasm2js", "wasm-dis": "bin/wasm-dis", "wasm-opt": "bin/wasm-opt", "wasm-merge": "bin/wasm-merge", "wasm-shell": "bin/wasm-shell", "wasm-reduce": "bin/wasm-reduce", "wasm-metadce": "bin/wasm-metadce", "wasm-ctor-eval": "bin/wasm-ctor-eval" } }, "sha512-NyF5J0SfRoLDthpPh36FGTycOEv3Eqnkq3+mP5Cqt6iD9BLGGJMEVuPzu81nhLy2MMpPKmRTM9VLZihfyRQv8A=="],
 
