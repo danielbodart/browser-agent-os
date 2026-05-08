@@ -18,9 +18,20 @@ depends = ["build:coreutils"]
 dir = "{{config_root}}"
 run = "bun run scripts/wasm-opt.ts packages/coreutils/zig-out/bin"
 
+[tasks."build:shell"]
+description = "Compile @browser-agent-os/shell Zig binary to wasm32-wasi"
+dir = "{{config_root}}/packages/shell"
+run = "zig build -Doptimize=ReleaseSmall"
+
+[tasks."optimize:shell"]
+description = "Run wasm-opt -Oz on shell binary"
+depends = ["build:shell"]
+dir = "{{config_root}}"
+run = "bun run scripts/wasm-opt.ts packages/shell/zig-out/bin"
+
 [tasks."build:bins"]
 description = "Build + optimize all WASM binaries"
-depends = ["optimize:coreutils"]
+depends = ["optimize:coreutils", "optimize:shell"]
 
 [tasks."check"]
 description = "TypeScript typecheck"
@@ -43,4 +54,4 @@ run = "bun --hot run packages/host-bun/src/app.ts"
 
 [tasks."clean"]
 description = "Remove all build artefacts"
-run = "rm -rf packages/coreutils/zig-out packages/coreutils/.zig-cache packages/*/dist"
+run = "rm -rf packages/coreutils/zig-out packages/coreutils/.zig-cache packages/shell/zig-out packages/shell/.zig-cache packages/*/dist"

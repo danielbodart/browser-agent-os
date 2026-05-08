@@ -10,6 +10,10 @@ export {JSPITransport, type JSPITransportDependencies} from "./transport/JSPITra
 export {bootJspiRunner} from "./worker/jspi.ts";
 export type {RunnerIo} from "./worker/wasiCommon.ts";
 export {SyscallClient, type SyscallChannel} from "./worker/SyscallClient.ts";
+export {ExtClient, type ExtChannel} from "./worker/ExtClient.ts";
+export type {Ext, FdPipeResult, ProcSpawnResult, ProcJoinResult} from "./ext/Ext.ts";
+export {ExtHandler, type ExtSpawnFn} from "./ext/ExtHandler.ts";
+export {ProcessTable} from "./ext/ProcessTable.ts";
 export {FdTable} from "./fd/FdTable.ts";
 export type {FdEntry, FileFdEntry, DirFdEntry, PipeFdEntry} from "./fd/FdEntry.ts";
 export {SyscallHandler, SyscallError, type PipeBufferLookup} from "./syscall/SyscallHandler.ts";

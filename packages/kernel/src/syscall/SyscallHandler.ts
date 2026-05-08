@@ -68,9 +68,11 @@ export class SyscallHandler implements Syscalls {
     async fdClose(fd: number): Promise<void> {
         const entry = this.fds.close(fd);
         if (!entry) throw new SyscallError(EBADF, `bad fd ${fd}`);
-        if (entry.kind === 'file') await entry.handle.close();
-        if (entry.kind === 'dir') await entry.handle.close();
+        if (entry.kind === 'file' && entry.owned) await entry.handle.close();
+        if (entry.kind === 'dir' && entry.owned) await entry.handle.close();
         // Pipe ends are owned by LocalKernel/Transport — we don't release here.
+        // Borrowed file/dir entries (adopted from another process via proc_spawn)
+        // skip handle.close — only the owning process closes the underlying handle.
     }
 
     async fdSeek(fd: number, offset: bigint, whence: 0 | 1 | 2): Promise<bigint> {
@@ -130,10 +132,10 @@ export class SyscallHandler implements Syscalls {
         const abs = resolve(dir.path, path);
         if (flags.directory) {
             const handle = await this.fs.opendir(abs);
-            return this.fds.allocate({kind: 'dir', handle, path: abs, preopen: false});
+            return this.fds.allocate({kind: 'dir', handle, path: abs, preopen: false, owned: true});
         }
         const handle = await this.fs.open(abs, flags);
-        return this.fds.allocate({kind: 'file', handle, flags, position: 0n});
+        return this.fds.allocate({kind: 'file', handle, flags, position: 0n, owned: true});
     }
 
     async pathFilestatGet(dirfd: number, path: string): Promise<FileStat> {

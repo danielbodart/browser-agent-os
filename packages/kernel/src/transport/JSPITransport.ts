@@ -8,7 +8,9 @@ import {SyscallError} from "../syscall/SyscallHandler.ts";
 import {EIO} from "../wasi/Errno.ts";
 import {FsError} from "../fs/FileSystem.ts";
 import type {Syscalls} from "../syscall/Syscalls.ts";
+import type {Ext} from "../ext/Ext.ts";
 import type {ErrorMessage, ExitMessage, StartMessage, SyscallEnvelope, SyscallReply, SyscallRequest} from "../syscall/wire.ts";
+import type {ExtEnvelope, ExtReply, ExtRequest} from "../ext/wire.ts";
 
 export type JSPITransportDependencies =
     Dependency<'workerFactory', MessagingWorkerFactory> &
@@ -19,7 +21,7 @@ interface EndRecord {
     readonly kind: 'read' | 'write';
 }
 
-type WorkerInbound = ExitMessage | ErrorMessage | SyscallEnvelope;
+type WorkerInbound = ExitMessage | ErrorMessage | SyscallEnvelope | ExtEnvelope;
 
 export class JSPITransport implements Transport {
     private nextEndId = 1;
@@ -68,7 +70,7 @@ export class JSPITransport implements Transport {
         const worker = this.deps.workerFactory(this.deps.runnerUrl);
         return new Promise<TransportSpawnResult>((resolve, reject) => {
             worker.addMessageListener((message: WorkerInbound) => {
-                this.handleMessage(worker, opts.syscalls, message, resolve, reject);
+                this.handleMessage(worker, opts.syscalls, opts.ext, message, resolve, reject);
             });
             worker.addErrorListener(err => {
                 worker.terminate();
@@ -88,6 +90,7 @@ export class JSPITransport implements Transport {
     private handleMessage(
         worker: MessagingWorker,
         syscalls: Syscalls,
+        ext: Ext,
         message: WorkerInbound,
         resolve: (r: TransportSpawnResult) => void,
         reject: (e: Error) => void,
@@ -104,19 +107,30 @@ export class JSPITransport implements Transport {
             case 'syscall':
                 void this.serviceSyscall(worker, syscalls, message.request);
                 return;
+            case 'ext':
+                void this.serviceExt(worker, ext, message.request);
+                return;
         }
     }
 
     private async serviceSyscall(worker: MessagingWorker, syscalls: Syscalls, request: SyscallRequest): Promise<void> {
         try {
-            const result = await dispatch(syscalls, request);
+            const result = await dispatchSyscall(syscalls, request);
             const reply: SyscallReply = {type: 'syscallReply', reqId: request.reqId, ok: true, result: result as any};
             worker.postMessage(reply);
         } catch (e) {
-            let errno = EIO;
-            if (e instanceof SyscallError) errno = e.errno;
-            else if (e instanceof FsError) errno = e.errno;
-            const reply: SyscallReply = {type: 'syscallReply', reqId: request.reqId, ok: false, errno};
+            const reply: SyscallReply = {type: 'syscallReply', reqId: request.reqId, ok: false, errno: errnoFor(e)};
+            worker.postMessage(reply);
+        }
+    }
+
+    private async serviceExt(worker: MessagingWorker, ext: Ext, request: ExtRequest): Promise<void> {
+        try {
+            const result = await dispatchExt(ext, request);
+            const reply: ExtReply = {type: 'extReply', reqId: request.reqId, ok: true, result};
+            worker.postMessage(reply);
+        } catch (e) {
+            const reply: ExtReply = {type: 'extReply', reqId: request.reqId, ok: false, errno: errnoFor(e)};
             worker.postMessage(reply);
         }
     }
@@ -128,7 +142,13 @@ export class JSPITransport implements Transport {
     }
 }
 
-async function dispatch(syscalls: Syscalls, req: SyscallRequest): Promise<unknown> {
+function errnoFor(e: unknown): number {
+    if (e instanceof SyscallError) return e.errno;
+    if (e instanceof FsError) return e.errno;
+    return EIO;
+}
+
+async function dispatchSyscall(syscalls: Syscalls, req: SyscallRequest): Promise<unknown> {
     switch (req.op) {
         case 'fd_read': return syscalls.fdRead(req.fd, req.length);
         case 'fd_write': return syscalls.fdWrite(req.fd, req.bytes);
@@ -147,5 +167,13 @@ async function dispatch(syscalls: Syscalls, req: SyscallRequest): Promise<unknow
         case 'path_remove_directory': await syscalls.pathRemoveDirectory(req.dirfd, req.path); return null;
         case 'path_unlink_file': await syscalls.pathUnlinkFile(req.dirfd, req.path); return null;
         case 'path_rename': await syscalls.pathRename(req.dirfd, req.from, req.toDirfd, req.to); return null;
+    }
+}
+
+async function dispatchExt(ext: Ext, req: ExtRequest): Promise<any> {
+    switch (req.op) {
+        case 'fd_pipe': return ext.fdPipe();
+        case 'proc_spawn': return ext.procSpawn(req.path, req.argv, req.env, req.fdmap);
+        case 'proc_join': return ext.procJoin(req.pid);
     }
 }

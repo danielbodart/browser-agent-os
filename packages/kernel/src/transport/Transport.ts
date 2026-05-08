@@ -1,6 +1,7 @@
 import type {Pipe, PipeEnd} from "../pipe/Pipe.ts";
 import type {PipeBuffer} from "../pipe/PipeBuffer.ts";
 import type {Syscalls} from "../syscall/Syscalls.ts";
+import type {Ext} from "../ext/Ext.ts";
 import type {PreopenDescriptor} from "../syscall/wire.ts";
 
 export interface TransportSpawnOpts {
@@ -8,6 +9,7 @@ export interface TransportSpawnOpts {
     readonly args: readonly string[];
     readonly env: Readonly<Record<string, string>>;
     readonly syscalls: Syscalls;
+    readonly ext: Ext;
     readonly preopens: readonly PreopenDescriptor[];
 }
 

@@ -11,6 +11,7 @@ export interface FileFdEntry {
     readonly kind: 'file';
     readonly handle: FileHandle;
     readonly flags: OpenFlags;
+    readonly owned: boolean;
     position: bigint;
 }
 
@@ -19,6 +20,7 @@ export interface DirFdEntry {
     readonly handle: DirHandle;
     readonly path: string;
     readonly preopen: boolean;
+    readonly owned: boolean;
 }
 
 export type FdEntry = PipeFdEntry | FileFdEntry | DirFdEntry;

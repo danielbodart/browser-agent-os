@@ -3,7 +3,10 @@ import {CHARACTER_DEVICE, DIRECTORY, REGULAR_FILE} from "../wasi/Filetype.ts";
 import type {FileStat, OpenFlags} from "../fs/FileSystem.ts";
 import type {DirReadEntry} from "../syscall/Syscalls.ts";
 import type {PreopenDescriptor, StartMessage, SyscallReply} from "../syscall/wire.ts";
+import type {ExtReply} from "../ext/wire.ts";
 import {SyscallClient} from "./SyscallClient.ts";
+import {ExtClient} from "./ExtClient.ts";
+import {extPreview1} from "./extImports.ts";
 
 export interface RunnerIo {
     onMessage(handler: (msg: any) => void): void;
@@ -364,16 +367,25 @@ export interface BootOpts<S extends StartMessage> {
 }
 
 export function bootRunner<S extends StartMessage>(opts: BootOpts<S>): void {
-    const replyHandlers: Array<(r: SyscallReply) => void> = [];
+    const syscallReplyHandlers: Array<(r: SyscallReply) => void> = [];
+    const extReplyHandlers: Array<(r: ExtReply) => void> = [];
     const client = new SyscallClient({
         sendRequest(env) { opts.io.postMessage(env); },
-        onReply(h) { replyHandlers.push(h); },
+        onReply(h) { syscallReplyHandlers.push(h); },
+    });
+    const extClient = new ExtClient({
+        sendRequest(env) { opts.io.postMessage(env); },
+        onReply(h) { extReplyHandlers.push(h); },
     });
 
     opts.io.onMessage(msg => {
         if (msg && typeof msg === 'object') {
             if (msg.type === 'syscallReply') {
-                for (const h of replyHandlers) h(msg as SyscallReply);
+                for (const h of syscallReplyHandlers) h(msg as SyscallReply);
+                return;
+            }
+            if (msg.type === 'extReply') {
+                for (const h of extReplyHandlers) h(msg as ExtReply);
                 return;
             }
             if (msg.type === 'start') {
@@ -389,9 +401,12 @@ export function bootRunner<S extends StartMessage>(opts: BootOpts<S>): void {
 
         const raw = wasiPreview1<S>({start, client, mem});
         const wasiImports = opts.wrapImports(raw);
+        const extRaw = extPreview1({client: extClient, mem});
+        const extImports = opts.wrapImports(extRaw);
 
         const imports: WebAssembly.Imports = {
             wasi_snapshot_preview1: wasiImports as WebAssembly.ModuleImports,
+            browser_agent_os_ext: extImports as WebAssembly.ModuleImports,
         };
 
         let exitCode = 0;

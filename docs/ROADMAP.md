@@ -114,26 +114,43 @@ This is the stage that forces the JSPI question because `fd_write` and `fd_read`
 
 ---
 
-## Stage 4 — Shell binary + spawn extension
+## Stage 4 — `[done]` Shell binary + spawn extension
 
-**Goal:** A real Zig shell running as a guest binary. Reads commands from stdin, parses, looks up binaries on `PATH`, spawns children, waits, reports exit codes. No pipes at the shell level yet (kernel-level pipes already exist from Stage 1; shell will wire them up in a follow-up).
+**Goal:** A real Zig shell running as a guest binary. Reads commands from stdin, parses, spawns children, waits, reports exit codes. Pipes and `<` `>` `>>` redirects are wired at the shell level via a new `browser_agent_os_ext` namespace.
 
-**Deliverables:**
-- `packages/shell/` — single-binary Zig package, `bin/sh.wasm`
-- `packages/kernel/src/ext/BrowserAgentOsExt.ts` — clean import namespace `browser_agent_os_ext` with `spawn(path_ptr, path_len, argv_ptr, argv_len, env_ptr, env_len, fds_ptr, fds_len, pid_out_ptr) -> errno`
-- WASI shim in `worker/runner.ts` exposes `browser_agent_os_ext` alongside `wasi_snapshot_preview1`
-- Zig FFI in `packages/shell/` for the spawn import
-- Builtins: `cd`, `pwd`, `exit`, `export`. Everything else looked up on `PATH`
-- `kernel.spawn('sh', [], {PATH: '/bin'})` runs interactively over stdin/stdout connected to test fixture
+**What landed:**
+- `packages/shell/` — Zig pkg producing `bin/sh.wasm`. `build.zig` mirrors `packages/coreutils/`. Tokenizer + parser + executor + REPL in single `src/main.zig` (~520 lines).
+- `packages/kernel/src/ext/wire.ts` — `ExtRequest` / `ExtReply` discriminated unions, parallel to `syscall/wire.ts`. Three ops: `fd_pipe`, `proc_spawn`, `proc_join`.
+- `packages/kernel/src/ext/Ext.ts` + `ExtHandler.ts` + `ProcessTable.ts` — kernel-side handler. Per-process `ExtHandler` constructed in `LocalKernel.spawnWithEntries` alongside `SyscallHandler`. `ProcessTable` maps pid → exit-promise; `procJoin` `take`s the promise (single-use; second join returns `ECHILD`).
+- `packages/kernel/src/worker/ExtClient.ts` + `extImports.ts` — guest-side RPC client + the `browser_agent_os_ext` namespace functions (`fd_pipe`, `proc_spawn`, `proc_join`). All async; `Suspending`-wrapped via the existing `wrapImports` pass.
+- `packages/kernel/src/worker/wasiCommon.ts` — bootRunner now wires both `wasi_snapshot_preview1` and `browser_agent_os_ext`.
+- `packages/kernel/src/transport/JSPITransport.ts` — extra `'ext'` message case on `handleMessage`; sibling `serviceExt` parallel to `serviceSyscall`.
+- `packages/kernel/src/LocalKernel.ts` — public `spawn(binary, args, env, fds<PipeEnd>)` unchanged; private `spawnWithEntries(binary, argv, env, entries<FdEntry>)` does the heavy lifting and is what `ExtHandler.procSpawn` re-enters.
+- `packages/kernel/src/fd/FdEntry.ts` — `FileFdEntry`/`DirFdEntry` gain `owned: boolean`. `SyscallHandler.fdClose` skips `handle.close()` for borrowed entries (entries adopted from another process via `proc_spawn`). Prevents double-close when shell hands a redirect fd to a child.
+- `packages/kernel/src/wasi/Errno.ts` — `ECHILD = 12` added.
+- `packages/host-bun/src/server.ts` — `binariesDirs: readonly string[]`, first match wins. `app.ts` lists both `coreutils/zig-out/bin` and `shell/zig-out/bin`.
+- `mise.toml` — `build:shell` + `optimize:shell`; `build:bins` depends on both.
+- `packages/host-bun/test/shell.test.ts` — 6 cases: `echo hello`, `echo hello | cat`, `echo a | cat | cat`, `echo > file` redirect + read-back, `pwd`, `exit 7`.
 
-**Acceptance:**
-- Shell test: feed `echo hello\nexit\n` on stdin, capture `hello\n` on stdout, exit code 0.
-- Shell pipeline test: feed `echo hello | cat\nexit\n`, get `hello\n`. (Requires shell to call `browser_agent_os_ext::spawn` twice with a pipe pair connecting them.)
+**Acceptance — verified:**
+- `echo hello\nexit\n` → stdout `hello\n`, exit 0.
+- `echo hello | cat\nexit\n` → stdout `hello\n`, exit 0.
+- `echo a | cat | cat\nexit\n` → stdout `a\n` (multi-stage).
+- `echo hi > /out.txt\ncat /out.txt\nexit\n` → stdout `hi\n`, file persisted.
+- `pwd` at root, `exit 7` exit-code propagation — green.
 
-**Open questions:**
-- How does the shell pass redirect/pipe fds to spawn? Define the `fds` array shape: `[{src_fd, dst_fd}, ...]`?
-- Job control / Ctrl-C: skip for now? `proc_kill` extension later?
-- Shell parser scope: simple word splitting + `|` + `>` `<` redirects, or skip redirects until later?
+**Open questions — resolved:**
+- *Spawn API shape:* `proc_spawn` (non-blocking, returns pid) + `proc_join(pid)` (returns exit code). WASIX prior-art names; matches POSIX `posix_spawn`+`waitpid` semantics. Required for pipelines (children must run concurrently).
+- *Pipe API:* `fd_pipe(read_fd_out, write_fd_out)` returns *shell fds*, not opaque end-ids. Pipe ends become first-class fds in the shell's `FdTable`, unifying file redirects and pipe wiring under a single fdmap shape.
+- *fdmap shape:* flat `(child_fd, parent_shell_fd)` i32 pairs in the spawn call. Kernel looks up each `parent_shell_fd` in caller's `FdTable` and adopts a borrowed copy into the child's table. File and pipe redirects use identical mechanism.
+- *Parser scope:* whitespace word-split, `|` pipelines, `<` `>` `>>` redirects, builtins (`cd`/`pwd`/`exit`/`export`). No quoting, no `&`/`;`/`&&`/`||`/`$VAR` — defer.
+- *Job control / signals:* skipped. `proc_kill` deferred until xterm.js (Stage 5) has a Ctrl-C source.
+- *Wire channel:* a parallel `'ext'`/`'extReply'` envelope alongside the existing syscall channel. Same `MessagingWorker` post path, separate reqId space, separate `ExtClient`. Duplication accepted; a generic `RpcClient<>` may be extracted when a third channel arrives.
+- *Borrowed FdEntries:* `ExtHandler.procSpawn` clones each adopted file/dir entry with `owned: false` (and resets `position` for files). Prevents double-close from parent + child. Pipe entries don't carry an `owned` flag because pipe ends are never released by `fdClose` anyway (transport owns the buffer).
+
+**Known limitations (deferred):**
+- Pipe ends allocated via `fd_pipe` are not released from `JSPITransport.ends` when the shell `fd_close`s them. `SyscallHandler.fdClose` for pipe entries removes the table entry but doesn't call `transport.releaseEnd`. Bounded leak per `JSPITransport` instance; revisit when shells run long enough to matter (likely Stage 5 once xterm.js is live).
+- No path normalisation in `cd`. `cd ..` stores literal `..` in `cwd`, which the kernel won't resolve. Acceptable for Stage 4 scope.
 
 ---
 

@@ -13,7 +13,7 @@ const RUNNER = join(ROOT, "packages", "kernel", "src", "worker", "runner.jspi.we
 let listener: ReturnType<typeof serve>;
 
 beforeAll(() => {
-    listener = serve({port: 0, fetch: server({binariesDir: BINARIES})});
+    listener = serve({port: 0, fetch: server({binariesDirs: [BINARIES]})});
 });
 
 afterAll(() => {
