@@ -3,9 +3,18 @@ zig = "0.16.0"
 bun = "latest"
 node = "latest"
 
-[tasks."install"]
+[tasks."install:deps"]
 description = "Install JS dependencies"
 run = "bun install --ignore-scripts"
+
+[tasks."install:playwright"]
+description = "Download Playwright browsers (chromium)"
+depends = ["install:deps"]
+run = "bunx playwright install chromium"
+
+[tasks."install"]
+description = "Install JS dependencies + Playwright browsers"
+depends = ["install:deps", "install:playwright"]
 
 [tasks."build:coreutils"]
 description = "Compile @browser-agent-os/coreutils Zig binaries to wasm32-wasi"
