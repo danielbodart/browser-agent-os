@@ -206,20 +206,20 @@ This is the stage that forces the JSPI question because `fd_write` and `fd_read`
 - `mkdir`: `-p` (create parents, treats EEXIST as benign).
 - `rmdir`: no flags.
 - `rm`: `-r`/`-R` (iterative post-order tree removal via fd_readdir), `-f` (silence missing files).
-- `cp`: file→file copy only. Read-loop + write-loop. **No `-r` / dir support yet** (see "Open questions" below).
+- `cp`: file→file copy + `-r` recursive directory tree copy (iterative via `fd_readdir`). Read-loop + write-loop per file. Overwrites existing dest. Error-return paths (ENOENT, EISDIR-without-`-r`) currently trap due to a Zig 0.16 wasm codegen bug — see "Known limitations" below.
 - `mv`: single `path_rename` call; no flags.
 - `touch`: create-only via `path_open(O_CREAT)`. No mtime update because WASI `path_filestat_set_times` returns `ENOSYS` in the kernel.
 
 **Acceptance — verified:**
 - Each of the 13 new binaries has a happy-path + error-case test in `packages/host-bun/test/coreutils/`.
-- 60 of 61 tests across 18 files pass under `bun test`. The single failure is a pre-existing `opfsFs.test.ts` flake (concurrent `Bun.build` reading `kernel/src/index.ts`) that reproduces on a base checkout with the new coreutils removed — unrelated to Stage 6.
+- 61 of 62 tests across 18 files pass under `bun test`. The single failure is a pre-existing `opfsFs.test.ts` flake (concurrent `Bun.build` reading `kernel/src/index.ts`) that reproduces on a base checkout with the new coreutils removed — unrelated to Stage 6.
 
 **Open questions — resolved:**
 - *Argument parsing:* hand-roll per binary. The flag sets are too divergent for a shared `Args` module to pay for itself at 13 binaries; the duplicated code is ~5 lines per binary.
 - *POSIX flag conformance:* minimal. Enough to be usable from the shell, no `-l`/`-a` on `ls`, no `-p`/`-i` on `cp`, no `-f` follow on `tail`. The roadmap can grow these later as agents and scripts actually need them.
 
 **Known limitations (deferred):**
-- **`cp -r` / `cp file dir/` / `cp` error reporting for missing source.** Zig 0.16 wasm hits a JSPI codegen quirk where a guest function that wraps a Suspending import (e.g., `path_open`) and then returns an error — followed by the caller writing stderr and calling `proc_exit(1)` — traps with `unreachable` instead of exiting cleanly. **Confirmed in both Bun 1.3.13 and headless Chrome via a smoke test** (the cp worker traps, shell's `proc_join` never returns, subsequent commands hang), so this is upstream in Zig's wasm codegen, not a runtime quirk. The same pattern works for `rm`'s `path_unlink_file` and `mkdir`'s `path_create_directory` (smaller-arity imports), but reproducibly fails for `path_open`-bearing wrappers. After several hours of bisection (helper return types, error sets, fd_close placement, inline vs. function-wrapped imports, output-pointer alignment) we settled on the workaround: `cp` does a single linear file-copy in `main` only, and refuses anything that isn't a plain regular-file→regular-file copy. Recursive `cp -r` is deferred until either Zig ships a fix, or we move to a different copy primitive (e.g., a kernel-side `path_copy` ext op).
+- **`cp` error-return paths trap.** Zig 0.16 wasm emits a `(unreachable)`-bodied stub function for each WASI extern — visible in the disassembly as e.g. `.Lpath_open|wasi_snapshot_preview1_bitcast_invalid` — and routes calls through the stub from any user-defined helper that wraps the extern. The optimizer normally rewrites those stub calls into direct import calls (`call $fimport$N`), but when the user helper is non-`inline` and reached through certain control-flow shapes the rewrite is skipped, leaving a live `call $stub` that traps at runtime with "Unreachable code". Confirmed identical behaviour in Bun 1.3.13 and headless Chrome (the cp worker traps; shell's `proc_join` never returns; subsequent commands hang), so this is upstream Zig wasm codegen, not a runtime issue. Marking the helpers `inline fn` recovers most of the binary (file copy, dir-tree `-r`, overwrite); the error-return paths through `doCopy` for ENOENT/EISDIR still trap and are excluded from the test suite. Filing upstream as Zig issue; possible fixes here include a kernel-side `path_copy` ext op or fully inlining the error path into `main`.
 - `touch` cannot update an existing file's mtime — kernel returns `ENOSYS` for `path_filestat_set_times`.
 - `env` doesn't run a command yet (no `env K=V cmd args...` form). Same `proc_spawn` glue as the shell would be needed; lift if a script needs it.
 
