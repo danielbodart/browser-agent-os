@@ -187,18 +187,41 @@ This is the stage that forces the JSPI question because `fd_write` and `fd_read`
 
 ---
 
-## Stage 6 — Coreutils growth
+## Stage 6 — `[done]` Coreutils growth
 
 **Goal:** Useful set of POSIX-shaped utilities. Driven by what the shell needs in real use.
 
-**Deliverables:** Zig binaries in `packages/coreutils/src/<name>/main.zig`:
-- `ls`, `pwd`, `cat`, `head`, `tail`, `wc`, `env`, `true`, `false`, `mkdir`, `rmdir`, `rm`, `cp`, `mv`, `touch`
+**What landed:**
+- `packages/coreutils/src/<name>/main.zig` for each of the 13 new binaries: `pwd`, `head`, `tail`, `wc`, `env`, `true`, `false`, `mkdir`, `rmdir`, `rm`, `cp`, `mv`, `touch` (joining the existing `echo`, `cat`, `ls`).
+- `packages/coreutils/build.zig` `bins` array updated to enumerate all 16.
+- `packages/host-bun/test/coreutils/<name>.test.ts` — one test file per new binary, with `helpers.ts` factoring out the `buildKernel`/server scaffolding.
+- `packages/shell/src/main.zig` — shell now `env.put("PWD", ...)` on init and on every `cd`, so the standalone `pwd` binary (which reads `$PWD`) reports the right cwd when run from the shell.
 
-**Acceptance:** Each binary has a test in `packages/host-bun/test/coreutils/<name>.test.ts` exercising at least the happy path and one error case.
+**Per-binary scope:**
+- `true` / `false`: exit 0 / exit 1, no flags.
+- `pwd`: reads `$PWD`, falls back to `/`. No flags.
+- `env`: prints `K=V` lines from `init.environ_map`. No `env K=V cmd...` form yet (would need ext spawn).
+- `head` / `tail`: `-n N` (default 10 lines) and `-c N` (bytes). Files or stdin. Multi-file `==>name<==` banners.
+- `wc`: `-l` / `-w` / `-c` (default all three). Files or stdin. Totals row when >1 file.
+- `mkdir`: `-p` (create parents, treats EEXIST as benign).
+- `rmdir`: no flags.
+- `rm`: `-r`/`-R` (iterative post-order tree removal via fd_readdir), `-f` (silence missing files).
+- `cp`: file→file copy only. Read-loop + write-loop. **No `-r` / dir support yet** (see "Open questions" below).
+- `mv`: single `path_rename` call; no flags.
+- `touch`: create-only via `path_open(O_CREAT)`. No mtime update because WASI `path_filestat_set_times` returns `ENOSYS` in the kernel.
 
-**Open questions:**
-- Argument parsing: hand-roll per binary, or factor a small `Args` helper module in Zig?
-- POSIX flag conformance scope — match GNU coreutils behaviour or stay minimal?
+**Acceptance — verified:**
+- Each of the 13 new binaries has a happy-path + error-case test in `packages/host-bun/test/coreutils/`.
+- 60 of 61 tests across 18 files pass under `bun test`. The single failure is a pre-existing `opfsFs.test.ts` flake (concurrent `Bun.build` reading `kernel/src/index.ts`) that reproduces on a base checkout with the new coreutils removed — unrelated to Stage 6.
+
+**Open questions — resolved:**
+- *Argument parsing:* hand-roll per binary. The flag sets are too divergent for a shared `Args` module to pay for itself at 13 binaries; the duplicated code is ~5 lines per binary.
+- *POSIX flag conformance:* minimal. Enough to be usable from the shell, no `-l`/`-a` on `ls`, no `-p`/`-i` on `cp`, no `-f` follow on `tail`. The roadmap can grow these later as agents and scripts actually need them.
+
+**Known limitations (deferred):**
+- **`cp -r` / `cp file dir/` / `cp` error reporting for missing source.** Zig 0.16 wasm hits a JSPI codegen quirk where a guest function that wraps a Suspending import (e.g., `path_open`) and then returns an error — followed by the caller writing stderr and calling `proc_exit(1)` — traps with `unreachable` instead of exiting cleanly. **Confirmed in both Bun 1.3.13 and headless Chrome via a smoke test** (the cp worker traps, shell's `proc_join` never returns, subsequent commands hang), so this is upstream in Zig's wasm codegen, not a runtime quirk. The same pattern works for `rm`'s `path_unlink_file` and `mkdir`'s `path_create_directory` (smaller-arity imports), but reproducibly fails for `path_open`-bearing wrappers. After several hours of bisection (helper return types, error sets, fd_close placement, inline vs. function-wrapped imports, output-pointer alignment) we settled on the workaround: `cp` does a single linear file-copy in `main` only, and refuses anything that isn't a plain regular-file→regular-file copy. Recursive `cp -r` is deferred until either Zig ships a fix, or we move to a different copy primitive (e.g., a kernel-side `path_copy` ext op).
+- `touch` cannot update an existing file's mtime — kernel returns `ENOSYS` for `path_filestat_set_times`.
+- `env` doesn't run a command yet (no `env K=V cmd args...` form). Same `proc_spawn` glue as the shell would be needed; lift if a script needs it.
 
 ---
 

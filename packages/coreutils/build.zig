@@ -8,6 +8,19 @@ const bins = [_]Bin{
     .{ .name = "echo" },
     .{ .name = "cat" },
     .{ .name = "ls" },
+    .{ .name = "pwd" },
+    .{ .name = "head" },
+    .{ .name = "tail" },
+    .{ .name = "wc" },
+    .{ .name = "env" },
+    .{ .name = "true" },
+    .{ .name = "false" },
+    .{ .name = "mkdir" },
+    .{ .name = "rmdir" },
+    .{ .name = "rm" },
+    .{ .name = "cp" },
+    .{ .name = "mv" },
+    .{ .name = "touch" },
 };
 
 pub fn build(b: *std.Build) void {

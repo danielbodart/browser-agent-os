@@ -92,6 +92,7 @@ const Shell = struct {
             .env = env,
         };
         try sh.cwd.appendSlice(allocator, "/");
+        try env.put("PWD", "/");
         return sh;
     }
 
@@ -337,6 +338,7 @@ fn setCwd(sh: *Shell, target: []const u8) !void {
     defer sh.allocator.free(normalized);
     sh.cwd.clearRetainingCapacity();
     try sh.cwd.appendSlice(sh.allocator, normalized);
+    try sh.env.put("PWD", sh.cwd.items);
 }
 
 // ---------------- pipeline execution ----------------
