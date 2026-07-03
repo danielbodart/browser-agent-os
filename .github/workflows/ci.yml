@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# One run per ref; a newer push cancels the older in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Installs mise + the tools pinned in mise.toml (zig, bun, node) and caches them.
+      - uses: jdx/mise-action@v2
+
+      - name: Install JS dependencies
+        run: mise run install:deps
+
+      # Headless-Chrome smoke tests (host-browser) drive Playwright Chromium.
+      # --with-deps pulls the OS libraries the browser needs on a bare runner;
+      # the local mise task omits them since dev machines already have them.
+      - name: Install Playwright Chromium
+        run: bunx playwright install --with-deps chromium
+
+      # build:bins (zig + wasm-opt) -> typecheck -> full test suite.
+      - name: Build, typecheck, test
+        run: mise run build
