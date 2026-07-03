@@ -1,4 +1,5 @@
 import {join} from "node:path";
+import {bundle} from "../../src/bundle.ts";
 import type {Http} from "../../src/server.ts";
 
 interface Bundles {
@@ -11,23 +12,9 @@ async function buildBundles(): Promise<Bundles> {
     const pageEntry = join(root, "packages", "host-bun", "test", "opfs", "page.ts");
     const workerEntry = join(root, "packages", "host-bun", "test", "opfs", "worker-entry.ts");
 
-    const pageBuild = await Bun.build({
-        entrypoints: [pageEntry],
-        target: "browser",
-        format: "esm",
-    });
-    if (!pageBuild.success) throw new Error(`page bundle: ${pageBuild.logs.join("\n")}`);
-    const pageJs = await pageBuild.outputs[0].text();
-
-    const workerBuild = await Bun.build({
-        entrypoints: [workerEntry],
-        target: "browser",
-        format: "esm",
-    });
-    if (!workerBuild.success) throw new Error(`worker bundle: ${workerBuild.logs.join("\n")}`);
-    const workerJs = await workerBuild.outputs[0].text();
-
-    return {page: pageJs, worker: workerJs};
+    const page = await bundle(pageEntry, "opfs page");
+    const worker = await bundle(workerEntry, "opfs worker");
+    return {page, worker};
 }
 
 const HTML = `<!DOCTYPE html>

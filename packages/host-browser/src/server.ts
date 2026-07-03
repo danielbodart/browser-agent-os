@@ -1,5 +1,5 @@
 import {join} from "node:path";
-import type {Http} from "@browser-agent-os/host-bun";
+import {bundle, type Http} from "@browser-agent-os/host-bun";
 
 const ROOT = join(import.meta.dir, "..");
 const PAGE_ENTRY = join(ROOT, "src", "app.ts");
@@ -19,13 +19,9 @@ export interface Bundles {
     readonly xtermCss: string;
 }
 
-async function bundle(entry: string, label: string): Promise<string> {
-    const out = await Bun.build({entrypoints: [entry], target: "browser", format: "esm"});
-    if (!out.success) throw new Error(`${label} bundle failed:\n${out.logs.join("\n")}`);
-    return out.outputs[0].text();
-}
-
 export async function buildBundles(): Promise<Bundles> {
+    // `bundle` serialises builds process-wide, so these run one at a time even
+    // inside Promise.all; the two file reads still overlap freely.
     const [html, app, jspiRunner, opfsRunner, xtermCss] = await Promise.all([
         Bun.file(HTML_FILE).text(),
         bundle(PAGE_ENTRY, "app"),
