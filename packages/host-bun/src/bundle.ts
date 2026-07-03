@@ -1,42 +1,26 @@
 // Shared browser-bundle helper for dev servers and tests.
 //
-// Bun.build intermittently fails with `error: Unexpected reading file: <path>`
-// when it runs during `bun test`: the test runtime is transpiling the same
-// shared source (kernel/src/index.ts, imported by every browser entrypoint and
-// by many test files) while the bundler reads it. It only trips on CI's runner
-// scheduling — never reproduced locally or in the CI container image.
-//
-// Guards: serialise every build process-wide so no two run at once, and retry
-// the transient failure with a short delay so the contended read can settle.
+// We shell out to the `bun build` CLI instead of the in-process `Bun.build`
+// API on purpose. Under `bun test`, the runtime has already imported
+// kernel/src/index.ts (many test files use it), and calling Bun.build on an
+// entrypoint that also imports it makes the bundler's file layer collide with
+// the loaded module — Bun throws `Unexpected reading file: .../index.ts`. It's
+// deterministic on CI's runner and unreproducible locally. A separate `bun
+// build` process has its own module registry, so there's no collision.
 
-let chain: Promise<unknown> = Promise.resolve();
-
-const MAX_ATTEMPTS = 5;
-const RETRY_DELAY_MS = 300;
-
-const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
-
-/** Bundle a browser ESM entrypoint to a JS string. Serialised process-wide; retried on transient bundler errors. */
-export function bundle(entry: string, label: string): Promise<string> {
-    const run = chain.then(() => buildOnce(entry, label));
-    // Keep the chain alive even if this build rejects, so later builds still serialise.
-    chain = run.then(() => {}, () => {});
-    return run;
-}
-
-async function buildOnce(entry: string, label: string): Promise<string> {
-    let lastDetail = "";
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        try {
-            const out = await Bun.build({entrypoints: [entry], target: "browser", format: "esm"});
-            if (out.success) return out.outputs[0].text();
-            lastDetail = out.logs.map(String).join("\n");
-        } catch (e) {
-            // Bun.build throws AggregateError on failure; its .errors hold the real messages.
-            const errs = (e as {errors?: unknown[]}).errors;
-            lastDetail = Array.isArray(errs) ? errs.map(String).join("\n") : String(e);
-        }
-        if (attempt < MAX_ATTEMPTS) await sleep(RETRY_DELAY_MS);
+/** Bundle a browser ESM entrypoint to a JS string via a separate `bun build` process. */
+export async function bundle(entry: string, label: string): Promise<string> {
+    const proc = Bun.spawn(
+        ["bun", "build", entry, "--target=browser", "--format=esm"],
+        {stdout: "pipe", stderr: "pipe"},
+    );
+    const [code, js, err] = await Promise.all([
+        proc.exited,
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+    ]);
+    if (code !== 0 || js.length === 0) {
+        throw new Error(`${label} bundle failed (exit ${code}):\n${err}`);
     }
-    throw new Error(`${label} bundle failed after ${MAX_ATTEMPTS} attempts:\n${lastDetail}`);
+    return js;
 }
