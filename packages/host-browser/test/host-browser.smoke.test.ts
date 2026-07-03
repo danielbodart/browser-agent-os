@@ -24,7 +24,9 @@ beforeAll(async () => {
             return browserH(req);
         },
     });
-    browser = await chromium.launch({headless: true});
+    // --no-sandbox: required when running as root (the CI Playwright container);
+    // a no-op for the sandbox on normal dev machines. Standard CI Chromium flag.
+    browser = await chromium.launch({headless: true, args: ["--no-sandbox"]});
 }, 60_000);
 
 afterAll(async () => {

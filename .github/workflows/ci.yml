@@ -11,12 +11,15 @@ concurrency:
 
 jobs:
   build:
-    # 22.04 (jammy), not ubuntu-latest (24.04/noble): Playwright 1.59.x has no
-    # official Chromium build for noble, falls back to an unofficial build, and
-    # the install hangs after download until the job times out. Jammy is a
-    # supported target and downloads the real build.
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Playwright's own browser downloader hangs after the download completes on
+    # bare GitHub runners (both bunx and npx, both noble and jammy). The official
+    # Playwright image ships the matching Chromium pre-installed at
+    # $PLAYWRIGHT_BROWSERS_PATH, so no download happens at all. Keep the tag in
+    # sync with the `playwright` version in package.json / bun.lock.
+    container:
+      image: mcr.microsoft.com/playwright:v1.59.1-jammy
     steps:
       - uses: actions/checkout@v4
 
@@ -26,13 +29,7 @@ jobs:
       - name: Install JS dependencies
         run: mise run install:deps
 
-      # Headless-Chrome smoke tests (host-browser) drive Playwright Chromium.
-      # npx (Node), NOT bunx: bun's runner doesn't cleanly exit Playwright's Node
-      # CLI after the browser download finishes and hangs until the job times out.
-      # --with-deps pulls the OS libraries the browser needs on a bare runner.
-      - name: Install Playwright Chromium
-        run: npx --yes playwright install --with-deps chromium
-
-      # build:bins (zig + wasm-opt) -> typecheck -> full test suite.
+      # build:bins (zig + wasm-opt) -> typecheck -> full test suite, including the
+      # headless-Chrome host-browser smoke tests (Chromium from the container image).
       - name: Build, typecheck, test
         run: mise run build
