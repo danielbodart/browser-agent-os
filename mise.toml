@@ -10,7 +10,9 @@ run = "bun install --ignore-scripts"
 [tasks."install:playwright"]
 description = "Download Playwright browsers (chromium)"
 depends = ["install:deps"]
-run = "bunx playwright install chromium"
+# npx (Node), not bunx: bun's runner doesn't cleanly exit Playwright's Node CLI
+# after the browser download completes — it hangs indefinitely (seen in CI).
+run = "npx --yes playwright install chromium"
 
 [tasks."install"]
 description = "Install JS dependencies + Playwright browsers"

@@ -23,10 +23,11 @@ jobs:
         run: mise run install:deps
 
       # Headless-Chrome smoke tests (host-browser) drive Playwright Chromium.
-      # --with-deps pulls the OS libraries the browser needs on a bare runner;
-      # the local mise task omits them since dev machines already have them.
+      # npx (Node), NOT bunx: bun's runner doesn't cleanly exit Playwright's Node
+      # CLI after the browser download finishes and hangs until the job times out.
+      # --with-deps pulls the OS libraries the browser needs on a bare runner.
       - name: Install Playwright Chromium
-        run: bunx playwright install --with-deps chromium
+        run: npx --yes playwright install --with-deps chromium
 
       # build:bins (zig + wasm-opt) -> typecheck -> full test suite.
       - name: Build, typecheck, test
