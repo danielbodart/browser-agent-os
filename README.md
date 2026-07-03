@@ -31,7 +31,9 @@ browser-agent-os/
 └── packages/
     ├── kernel/                   ← @browser-agent-os/kernel: env-agnostic WASI core (TS)
     ├── host-bun/                 ← @browser-agent-os/host-bun: Bun dev server + tests
-    └── coreutils/                ← Zig package, multiple wasm32-wasi binaries (echo, ...)
+    ├── host-browser/             ← @browser-agent-os/host-browser: xterm.js + OPFS browser host
+    ├── shell/                    ← Zig package: sh.wasm (parser, pipes, redirects, REPL)
+    └── coreutils/                ← Zig package, multiple wasm32-wasi binaries (echo, cat, ls, ...)
 ```
 
 ## Quick start
@@ -39,8 +41,9 @@ browser-agent-os/
 ```
 mise install              # bun + zig + node
 mise run build:bins       # zig build + wasm-opt
-mise run test             # end-to-end echo test in a real Worker
+mise run test             # full suite (kernel + coreutils + shell + headless-Chrome smoke)
 mise run dev              # Bun dev server on :3000 serving /bin/<name>
+mise run dev:browser      # browser host: xterm.js + kernel in a real tab on :3000
 ```
 
 ## Architecture summary
@@ -49,12 +52,17 @@ The browser tab boots a TypeScript runtime (`@browser-agent-os/kernel`) that exp
 
 ## Status
 
-Stage 1 done — `echo hello | cat` runs end-to-end through real concurrent
-inter-process pipes under both transports:
-`AtomicsTransport` (Bun, `SharedArrayBuffer` + `Atomics.wait`/`notify`) and
-`JSPITransport` (Node subprocess, `WebAssembly.Suspending` + `promising`).
-Kernel exposes `pipe()` + `spawn(..., fds)` as a lower-level substrate;
-backpressure verified at 64 KiB. No xterm, no OPFS, no shell yet.
+Stages 0–6 done (see [docs/ROADMAP.md](docs/ROADMAP.md)). A real browser tab
+boots xterm.js over the kernel: a Zig shell reads from stdin, spawns coreutils
+binaries as separate Web Workers, and wires pipes and `<`/`>`/`>>` redirects
+via the `browser_agent_os_ext` namespace. Filesystem is `MemoryFs` or OPFS
+(persistent across reloads) behind one `FileSystem` contract. A single
+`JSPITransport` (`WebAssembly.Suspending` + `promising`) runs in-process under
+Bun and inside Web Workers in Chrome — no `SharedArrayBuffer`, no COOP/COEP.
+Coreutils: `echo`, `cat`, `ls`, `pwd`, `head`, `tail`, `wc`, `env`, `true`,
+`false`, `mkdir`, `rmdir`, `rm`, `cp`, `mv`, `touch`.
+
+Next: Stage 7 (CI/CD) → Stage 8 (R2 firmware overlay FS).
 
 ## Inspiration
 
