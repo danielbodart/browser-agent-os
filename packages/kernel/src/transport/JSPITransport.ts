@@ -19,6 +19,10 @@ export type JSPITransportDependencies =
 interface EndRecord {
     readonly buffer: PipeBuffer;
     readonly kind: 'read' | 'write';
+    // Live process-holders of a write end. `closeWriteEnd` decrements; the buffer is
+    // only EOF'd at zero. An end that was never acquired (holders 0) closes immediately,
+    // which is what host-provided stdin ends and the kernel's default no-writer stdin want.
+    holders: number;
 }
 
 type WorkerInbound = ExitMessage | ErrorMessage | SyscallEnvelope | ExtEnvelope;
@@ -33,8 +37,8 @@ export class JSPITransport implements Transport {
         const buffer = new JsPipeBuffer(capacity);
         const writeId = this.nextEndId++;
         const readId = this.nextEndId++;
-        this.ends.set(writeId, {buffer, kind: 'write'});
-        this.ends.set(readId, {buffer, kind: 'read'});
+        this.ends.set(writeId, {buffer, kind: 'write', holders: 0});
+        this.ends.set(readId, {buffer, kind: 'read', holders: 0});
         return {
             writeEnd: {kind: 'write', id: writeId},
             readEnd: {kind: 'read', id: readId},
@@ -47,11 +51,18 @@ export class JSPITransport implements Transport {
         return drainBuffer(rec.buffer);
     }
 
+    acquireWriteEnd(end: PipeEnd): void {
+        const rec = this.endRecord(end);
+        if (rec.kind !== 'write') throw new Error(`acquireWriteEnd requires a write end (got ${rec.kind})`);
+        rec.holders++;
+    }
+
     closeWriteEnd(end: PipeEnd): void {
         const rec = this.ends.get(end.id);
         if (!rec) return;
         if (rec.kind !== 'write') throw new Error(`closeWriteEnd requires a write end (got ${rec.kind})`);
-        rec.buffer.closeWrite();
+        if (rec.holders > 0) rec.holders--;
+        if (rec.holders === 0) rec.buffer.closeWrite();
     }
 
     releaseEnd(end: PipeEnd): void {

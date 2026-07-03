@@ -96,6 +96,33 @@ describe("sh — Stage 4 acceptance", () => {
         expect(r.exitCode).toBe(0);
     });
 
+    it("sequential spawns: two echoes in one session both produce output", async () => {
+        // Regression: a child inherits the shell's stdout as a borrowed write end.
+        // The first child's exit must not close the shell's stdout, or every later
+        // command is silently muted. Only exercised when >1 spawning command runs.
+        const {kernel, transport} = buildCtx();
+        const stdin = kernel.pipe();
+        const buf = transport.pipeBuffer(stdin.writeEnd);
+        await buf.write(enc.encode("echo one\necho two\nexit\n"));
+        transport.closeWriteEnd(stdin.writeEnd);
+        const r = await kernel.spawn("sh", [], {PATH: "/bin"}, new Map([[0, stdin.readEnd]]));
+        expect(dec.decode(r.stdout)).toBe("one\ntwo\n");
+        expect(r.exitCode).toBe(0);
+    });
+
+    it("pipeline then command: shell stdout survives a completed pipeline", async () => {
+        // The last stage of a pipeline inherits the shell's stdout; its exit must
+        // not close that end either.
+        const {kernel, transport} = buildCtx();
+        const stdin = kernel.pipe();
+        const buf = transport.pipeBuffer(stdin.writeEnd);
+        await buf.write(enc.encode("echo a | cat\necho b\nexit\n"));
+        transport.closeWriteEnd(stdin.writeEnd);
+        const r = await kernel.spawn("sh", [], {PATH: "/bin"}, new Map([[0, stdin.readEnd]]));
+        expect(dec.decode(r.stdout)).toBe("a\nb\n");
+        expect(r.exitCode).toBe(0);
+    });
+
     it("exit code propagates: exit 7", async () => {
         const {kernel, transport} = buildCtx();
         const stdin = kernel.pipe();

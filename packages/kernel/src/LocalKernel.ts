@@ -86,6 +86,15 @@ export class LocalKernel implements Kernel {
 
         const url = this.deps.binaryResolver(binary).toString();
 
+        // This process holds a reference to each write end in its fd table. Register
+        // them so a borrowed end (e.g. a shell's stdout handed to a child) survives
+        // the child's exit — the buffer only EOFs once the last holder closes it.
+        for (const [, entry] of merged) {
+            if (entry.kind === 'pipe' && entry.direction === 'write') {
+                tx.acquireWriteEnd(entry.end);
+            }
+        }
+
         let exitCode = 0;
         try {
             const r = await tx.spawn({binaryUrl: url, args: argv, env, syscalls, ext, preopens});
